@@ -12,23 +12,21 @@
 #include "GameplayTagsManager.h"
 #include "Components/MassBattleAgentComponent.h"
 #include "Fragments/SubType.h"
+#include "Tasks/MassBattleBPTaskAgentsMoveTo.h"
+#include "Tasks/MassBattleBPTaskAgentsChaseAttack.h"
+#include "Interfaces/MassBattleAgentInterface.h"
+#include "FuncLibs/MassBattleFuncLib.h"
 
 DEFINE_LOG_CATEGORY(LogORTSSelection);
+
+namespace
+{
+	constexpr int32 MaxSynchronousFormationEntities = 512;
+}
 
 void URTSSelectionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-
-    if (ULocalPlayer* LP = GetLocalPlayer())
-    {
-        if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
-        {
-            SignalHub->OnCommandIssued.AddLambda([this](FGameplayTag Tag, AActor* Context)
-            {
-                this->IssueCommand(Tag);
-            });
-        }
-    }
 
     // C++ Auto-Config Grid (Transitent)
     // If no grid is provided, we create a default one with Move, Attack, Stop, Hold, Patrol
@@ -95,18 +93,36 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
 	// 1. Update Internal State
 	if (Modifier == ERTSSelectionModifier::Replace)
 	{
+		if (SelectedEntities.Num() > 0)
+		{
+			UMassBattleFuncLib::DeselectAgents(this, SelectedEntities, ESelectState::All);
+		}
+		
 		SelectedActors = FinalActors;
 		SelectedEntities = FinalEntities;
+		
+		if (SelectedEntities.Num() > 0)
+		{
+			UMassBattleFuncLib::SelectAgents(this, SelectedEntities, ESelectState::Selected);
+		}
 	}
 	else if (Modifier == ERTSSelectionModifier::Add)
 	{
 		for (AActor* Actor : FinalActors) SelectedActors.AddUnique(Actor);
 		for (const FEntityHandle& Handle : FinalEntities) SelectedEntities.AddUnique(Handle);
+		if (FinalEntities.Num() > 0)
+		{
+			UMassBattleFuncLib::SelectAgents(this, FinalEntities, ESelectState::Selected);
+		}
 	}
 	else if (Modifier == ERTSSelectionModifier::Remove)
 	{
 		for (AActor* Actor : FinalActors) SelectedActors.Remove(Actor);
 		for (const FEntityHandle& Handle : FinalEntities) SelectedEntities.Remove(Handle);
+		if (FinalEntities.Num() > 0)
+		{
+			UMassBattleFuncLib::DeselectAgents(this, FinalEntities, ESelectState::All);
+		}
 	}
 
 	// 2. Generate View Data
@@ -327,54 +343,81 @@ void URTSSelectionSubsystem::IssueCommand(FGameplayTag CommandTag)
 {
     UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued to Current Selection."), *CommandTag.ToString());
 
-    // 1. 发送给选中的 Actor
-    for (AActor* Actor : SelectedActors)
+    bool bHandledByCommandSystem = false;
+    if (ULocalPlayer* LP = GetLocalPlayer())
     {
-        if (Actor && Actor->Implements<URTSCommandInterface>())
+        if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
         {
-            IRTSCommandInterface::Execute_ExecuteCommand(Actor, CommandTag);
+            SignalHub->IssueCommand(CommandTag, nullptr);
+            bHandledByCommandSystem = true;
         }
     }
 
-    // 2. 核心补完：发送给选中的 Mass 实体 —— 解决“点击城市按钮无效/按钮显示默认”问题
-    // 在 Mass-centric 架构下，即便选中的是 Entity，也应将其关联的 Actor 作为中转执行命令
-    if (SelectedEntities.Num() > 0)
+    if (!bHandledByCommandSystem)
     {
-        UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
-        ULandmarkSubsystem* LandmarkSub = GetWorld()->GetSubsystem<ULandmarkSubsystem>();
-        
-        if (MassSubsystem)
+        for (AActor* Actor : SelectedActors)
         {
-            FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
-            
-            for (const FEntityHandle& Handle : SelectedEntities)
+            if (Actor && Actor->Implements<URTSCommandInterface>())
             {
-                // 先检查 Index 有效性，避免 IsValidIndex(-1) 崩溃
-                if (Handle.Index <= 0) continue;
-                FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
-                if (!EntityManager.IsEntityActive(NativeHandle)) continue;
+                IRTSCommandInterface::Execute_ExecuteCommand(Actor, CommandTag);
+            }
+        }
+    }
 
-                AActor* CommandExecutor = nullptr;
+    RequestCommandRefresh();
+}
 
-                // 尝试 A: 获取该实体的渲染 Actor (如果有的话，例如在高 LOD 模式下)
-                if (FRendering* RenderFrag = EntityManager.GetFragmentDataPtr<FRendering>(Handle))
-                {
-                    CommandExecutor = RenderFrag->BindingActorPtr.Get();
-                }
+void URTSSelectionSubsystem::IssueCommandWithLocation(FGameplayTag CommandTag, FVector Location)
+{
+    UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued with Location %s"), *CommandTag.ToString(), *Location.ToString());
 
-                // 尝试 B: fallback - 新架构中 Command Grid 由 ULandmarkSettings 配置，
-                // 无需通过模板 Actor 分发，此路径暂留以备后续扩展
-                // if (!CommandExecutor && LandmarkSub)
-                // {
-                //     FString EntityType = LandmarkSub->FindTypeByEntity(Handle);
-                //     CommandExecutor = LandmarkSub->GetTemplateActorByType(EntityType); // 已废弃
-                // }
+    bool bHandledByCommandSystem = false;
+    if (ULocalPlayer* LP = GetLocalPlayer())
+    {
+        if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+        {
+            SignalHub->IssueCommandWithLocation(CommandTag, Location);
+            bHandledByCommandSystem = true;
+        }
+    }
 
-                // 执行指令
-                if (CommandExecutor && CommandExecutor->Implements<URTSCommandInterface>())
-                {
-                    IRTSCommandInterface::Execute_ExecuteCommand(CommandExecutor, CommandTag);
-                }
+    if (!bHandledByCommandSystem)
+    {
+        // 回退：只对 Actor 实现兼容
+        for (AActor* Actor : SelectedActors)
+        {
+            if (Actor && Actor->Implements<URTSCommandInterface>())
+            {
+                IRTSCommandInterface::Execute_ExecuteCommandWithLocation(Actor, CommandTag, Location);
+            }
+        }
+    }
+
+    RequestCommandRefresh();
+}
+
+void URTSSelectionSubsystem::IssueCommandWithTarget(FGameplayTag CommandTag, AActor* TargetActor)
+{
+    UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued with TargetActor %s"), *CommandTag.ToString(), TargetActor ? *TargetActor->GetName() : TEXT("NULL"));
+
+    bool bHandledByCommandSystem = false;
+    if (ULocalPlayer* LP = GetLocalPlayer())
+    {
+        if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+        {
+            SignalHub->IssueCommandWithTarget(CommandTag, TargetActor);
+            bHandledByCommandSystem = true;
+        }
+    }
+
+    if (!bHandledByCommandSystem)
+    {
+        // 回退：只对 Actor 实现兼容
+        for (AActor* Actor : SelectedActors)
+        {
+            if (Actor && Actor->Implements<URTSCommandInterface>())
+            {
+                IRTSCommandInterface::Execute_ExecuteCommandWithTarget(Actor, CommandTag, TargetActor);
             }
         }
     }
