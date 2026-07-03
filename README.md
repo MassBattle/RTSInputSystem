@@ -1,12 +1,18 @@
-# OpenRTSCamera
+# RTSInputSystem
 
-Mass branch: `OpenRTSCamera` is now a Mass Battle Frame focused RTS camera, selection, and command-panel plugin. The standalone `RTSCommandSystem` runtime has been integrated into this plugin so a Mass Battle project can enable one camera/control plugin without also enabling the old command plugin.
+Mass branch: this repository is the integrated RTS input/control system for Mass Battle Frame. It combines the former `OpenRTSCamera` camera/selection plugin and the former `RTSCommandSystem` command-grid runtime into one repository.
+
+Repository name: `RTSInputSystem`
+
+Current Unreal plugin module name: `OpenRTSCamera`
+
+The module name is intentionally kept as `OpenRTSCamera` for now so existing assets, Blueprint references, and `/Script/OpenRTSCamera` paths keep loading. Renaming the C++ module should be a separate migration with explicit CoreRedirects and asset validation.
 
 ## Mass Battle Frame Integration
 
 Core plugin role:
 
-- `OpenRTSCamera` owns camera movement, camera bounds, selection, command dispatch, and the 3x5 command panel runtime.
+- `RTSInputSystem` owns camera movement, camera bounds, selection, command dispatch, and the 3x5 command panel runtime.
 - `MassBattleFrame` remains the source of Mass agent data and movement/behavior execution.
 - `FogOfWar` owns shared map bounds export through `Config/FogOfWarMapBounds.ini`.
 
@@ -38,7 +44,7 @@ This keeps the camera indirectly synchronized with the minimap/FogOfWar bounds w
 
 ## Command System Integration
 
-The previous `RTSCommandSystem` runtime classes are now inside `OpenRTSCamera`:
+The previous `RTSCommandSystem` runtime classes are now inside this repository:
 
 - `URTSCommandSubsystem`
 - `URTSCommandButton`
@@ -69,7 +75,7 @@ For the Mass branch, enable:
 - `MassGameplay`
 - `EnhancedInput`
 
-Do not enable the old `MassBattleMinimap`, `LandmarkSystem`, or `RTSCommandSystem` as dependencies for this integrated camera path.
+Do not enable the old `MassBattleMinimap`, `LandmarkSystem`, or standalone `RTSCommandSystem` as dependencies for this integrated camera path.
 
 - [Installing from GitHub](https://github.com/HeyZoos/OpenRTSCamera/wiki/Installing-from-GitHub)
 - [Getting Started](https://github.com/HeyZoos/OpenRTSCamera/wiki/Getting-Started)
