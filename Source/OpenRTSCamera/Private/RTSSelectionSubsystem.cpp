@@ -6,10 +6,9 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Interfaces/RTSCommandInterface.h"
-#include "LandmarkSubsystem.h"
 #include "Data/RTSCommandGridAsset.h"
 #include "Data/RTSCommandButton.h"
-#include "GameplayTagsManager.h"
+#include "Commands/RTSUnitCommands.h"
 #include "Components/MassBattleAgentComponent.h"
 #include "Fragments/SubType.h"
 #include "Tasks/MassBattleBPTaskAgentsMoveTo.h"
@@ -22,40 +21,36 @@ DEFINE_LOG_CATEGORY(LogORTSSelection);
 namespace
 {
 	constexpr int32 MaxSynchronousFormationEntities = 512;
+
+	FString GetActorGroupKey(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return FString();
+		}
+
+		if (const URTSSelectable* Selectable = Actor->FindComponentByClass<URTSSelectable>())
+		{
+			if (!Selectable->SelectionGroupKey.IsEmpty())
+			{
+				return Selectable->SelectionGroupKey;
+			}
+		}
+
+		return Actor->GetClass() ? Actor->GetClass()->GetName() : Actor->GetName();
+	}
 }
 
 void URTSSelectionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-    // C++ Auto-Config Grid (Transitent)
-    // If no grid is provided, we create a default one with Move, Attack, Stop, Hold, Patrol
+    // C++ Auto-Config Grid (Transient)
+    // If no grid is provided, use the built-in MassBattle unit grid.
     if (DefaultEntityGrid.IsNull())
     {
         UE_LOG(LogORTSSelection, Log, TEXT("Selection: Auto-configuring transient default grid."));
-        URTSCommandGridAsset* TransientGrid = NewObject<URTSCommandGridAsset>(this, TEXT("TransientDefaultGrid"));
-        
-        auto AddGenericBtn = [&](FString TagName, FString Name, int32 Index) {
-            URTSCommandButton* Btn = NewObject<URTSCommandButton>(TransientGrid);
-            Btn->CommandTag = FGameplayTag::RequestGameplayTag(FName(*TagName));
-            Btn->DisplayName = FText::FromString(Name);
-            Btn->PreferredIndex = Index;
-            TransientGrid->Buttons.Add(Btn);
-
-            // Ensure tag is registered natively to prevent warnings
-            UGameplayTagsManager::Get().AddNativeGameplayTag(FName(*TagName), FString::Printf(TEXT("Default command %s"), *Name));
-        };
-
-        static bool bTagsRegistered = false;
-        if (!bTagsRegistered)
-        {
-            AddGenericBtn(TEXT("RTS.Command.Move"), TEXT("移动"), 0);
-            AddGenericBtn(TEXT("RTS.Command.Attack"), TEXT("攻击"), 1);
-            AddGenericBtn(TEXT("RTS.Command.Stop"), TEXT("停止"), 2);
-            AddGenericBtn(TEXT("RTS.Command.Hold"), TEXT("保持"), 3);
-            AddGenericBtn(TEXT("RTS.Command.Patrol"), TEXT("巡逻"), 4);
-            bTagsRegistered = true;
-        }
+        URTSUnitCommandGrid* TransientGrid = NewObject<URTSUnitCommandGrid>(this, TEXT("TransientDefaultUnitCommandGrid"));
 
         DefaultEntityGrid = TransientGrid;
         DefaultGridNative = TransientGrid; // Keep it alive and accessible
@@ -195,7 +190,7 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
         // 路径A: Actor 组 —— 在选中 Actor 里找 ActiveKey 对应的 Actor，取其 Grid
         for (AActor* Actor : SelectedActors)
         {
-            if (Actor && Actor->GetClass()->GetDisplayNameText().ToString() == ActiveKey
+            if (Actor && GetActorGroupKey(Actor) == ActiveKey
                 && Actor->Implements<URTSCommandInterface>())
             {
                 NewGrid = IRTSCommandInterface::Execute_GetCommandGrid(Actor);
@@ -203,17 +198,7 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
             }
         }
 
-        // 路径B: Entity 组 —— ActiveKey 就是 TypeName（City1/MassUnit_SubType0/...）
-        // 直接查 LandmarkSubsystem 的 TypeGridAssets 表
-        if (!NewGrid)
-        {
-            UWorld* World = GetWorld();
-            ULandmarkSubsystem* LandmarkSub = World ? World->GetSubsystem<ULandmarkSubsystem>() : nullptr;
-            if (LandmarkSub)
-            {
-                NewGrid = LandmarkSub->GetGridByType(ActiveKey);
-            }
-        }
+        // Entity groups use the built-in MassBattle default grid below.
     }
 
     // 路径C: 兜底默认 Grid（士兵移动/攻击/停止）
@@ -252,7 +237,7 @@ void URTSSelectionSubsystem::RemoveUnit(const FRTSUnitData& UnitData)
 	else if (UnitData.EntityHandle.Index != 0) EntitiesToRemove.Add(UnitData.EntityHandle);
 	else
 	{
-		for (AActor* Act : SelectedActors) if (Act && Act->GetClass()->GetDisplayNameText().ToString() == UnitData.Name) ActorsToRemove.Add(Act);
+		for (AActor* Act : SelectedActors) if (Act && GetActorGroupKey(Act) == UnitData.Name) ActorsToRemove.Add(Act);
 	}
 
 	SetSelectedUnits(ActorsToRemove, EntitiesToRemove, ERTSSelectionModifier::Remove);
@@ -263,7 +248,7 @@ void URTSSelectionSubsystem::SelectGroup(const FString& GroupKey)
 	TArray<AActor*> NewActors;
 	TArray<FEntityHandle> NewEntities;
 
-	for (AActor* Act : SelectedActors) if (Act && Act->GetClass()->GetDisplayNameText().ToString() == GroupKey) NewActors.Add(Act);
+	for (AActor* Act : SelectedActors) if (Act && GetActorGroupKey(Act) == GroupKey) NewActors.Add(Act);
 	for (const FEntityHandle& Handle : SelectedEntities) 
     {
         FRTSUnitData Data = CreateUnitDataFromEntity(Handle);
@@ -278,7 +263,7 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromActor(AActor* Actor)
 	FRTSUnitData Data;
 	if (Actor)
 	{
-		Data.Name = Actor->GetClass()->GetDisplayNameText().ToString(); 
+		Data.Name = GetActorGroupKey(Actor);
 		Data.ActorPtr = Actor;
 		Data.bIsMassEntity = false;
 		
@@ -305,18 +290,7 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
     UWorld* World = GetWorld();
     if (!World) return Data;
 
-    // 路径1: 城市实体 —— 从 LandmarkSubsystem 反查类型名（City1~City5）用于分组
-    if (ULandmarkSubsystem* LandmarkSub = World->GetSubsystem<ULandmarkSubsystem>())
-    {
-        FString EntityType = LandmarkSub->FindTypeByEntity(Handle);
-        if (!EntityType.IsEmpty())
-        {
-            Data.Name = EntityType; // "City1", "City2" ...
-            return Data;
-        }
-    }
-
-    // 路径2: 普通 Mass 单位 —— 读取 FSubType.Index 作为分组 Key
+    // 普通 Mass 单位 —— 读取 FSubType.Index 作为分组 Key
     if (UMassEntitySubsystem* MassSys = World->GetSubsystem<UMassEntitySubsystem>())
     {
         FMassEntityManager& EM = MassSys->GetMutableEntityManager();
@@ -433,7 +407,7 @@ AActor* URTSSelectionSubsystem::GetActiveActor() const
         const FString& ActiveKey = AvailableGroupKeys[CurrentGroupIndex];
         for (AActor* Actor : SelectedActors)
         {
-            if (Actor && Actor->GetClass()->GetDisplayNameText().ToString() == ActiveKey) return Actor;
+            if (Actor && GetActorGroupKey(Actor) == ActiveKey) return Actor;
         }
     }
     return SelectedActors[0];

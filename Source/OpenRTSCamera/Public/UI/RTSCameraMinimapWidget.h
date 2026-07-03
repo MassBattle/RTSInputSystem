@@ -7,6 +7,8 @@
 #include "RTSCameraMinimapWidget.generated.h"
 
 class URTSCamera;
+class UCameraComponent;
+class USpringArmComponent;
 
 /**
  * URTSCameraMinimapWidget

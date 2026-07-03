@@ -1,4 +1,9 @@
 #pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "Engine/Texture2D.h"
+
 #include "RTSSelectable.generated.h"
 
 UCLASS(Blueprintable, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
@@ -13,6 +18,9 @@ public:
 	void OnDeselected();
 
 	// --- Visual Data ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	FString SelectionGroupKey;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
 	UTexture2D* Icon;
 

@@ -7,6 +7,8 @@
 #include "MassAPIStructs.h"
 #include "RTSSelectionStructs.generated.h"
 
+class UTexture2D;
+
 UENUM(BlueprintType)
 enum class ERTSSelectionMode : uint8
 {

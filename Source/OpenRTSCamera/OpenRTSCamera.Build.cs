@@ -24,26 +24,23 @@ public class OpenRTSCamera : ModuleRules
 			new[]
 			{
 				"Core",
+				"CoreUObject",
+				"Engine",
+				"GameplayTags",
+				"InputCore",
+				"MassAPI",
+				"MassEntity"
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new[]
 			{
-				"CoreUObject",
-				"Engine",
 				"EnhancedInput",
 				"Slate",
 				"SlateCore",
 				"UMG",
-				"InputCore",
-				"MassBattleMinimap",
-				"MassBattle",
-				"MassAPI",
-				"MassEntity",
-				"LandmarkSystem",
-				"GameplayTags",
-				"RTSCommandSystem"
+				"MassBattle"
 			}
 		);
 

@@ -1,4 +1,5 @@
 #include "UI/RTSUnitIconWidget.h"
+#include "RTSSelectionSubsystem.h"
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
 

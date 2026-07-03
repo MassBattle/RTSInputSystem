@@ -1,7 +1,12 @@
 #include "UI/RTSCommanderGridWidget.h"
 #include "Components/UniformGridSlot.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "RTSSelectionSubsystem.h" 
 #include "Interfaces/RTSCommandInterface.h" 
+#include "RTSSelector.h"
+#include "RTSCommandSubsystem.h"
+#include "UI/RTSTooltipWidget.h"
 
 
 void URTSCommanderGridWidget::NativePreConstruct()
@@ -105,13 +110,7 @@ void URTSCommanderGridWidget::OnSelectionUpdated(const FRTSSelectionView& View)
 
 	URTSCommandGridAsset* BaseGrid = nullptr;
     
-    // --- 核心逻辑变更：基于类型（ActiveGroupKey）获取命令面板 ---
-    if (ULandmarkSubsystem* LandmarkSys = GetWorld()->GetSubsystem<ULandmarkSubsystem>())
-    {
-        BaseGrid = LandmarkSys->GetGridByType(View.ActiveGroupKey);
-    }
-
-    // 如果 Subsystem 没找到映射，尝试从 ActiveActor 兜底（为了兼容非地标单位，如普通士兵）
+    // Try the active Actor first; pure Mass selections are handled by the selection subsystem default grid broadcast.
     if (!BaseGrid)
     {
         if (ULocalPlayer* LP = GetOwningLocalPlayer())
@@ -292,10 +291,34 @@ void URTSCommanderGridWidget::OnGridButtonClicked(const FGameplayTag& CommandTag
             // 对于非针对单位的逻辑（如顾问、科技），Actor 指针可能为空，
             // 但对于“兴奋剂”等单位技能，我们需要传入正确的执行者。
             AActor* ActiveActor = Selection->GetActiveActor();
-            
-            // 战术直达：按钮逻辑自决 (Pure Callback)
-            // 基础按钮会发 Tag 给 Actor，子菜单按钮会命令 UI 导航。
-            ClickedData->Execute(ActiveActor);
+            const bool bNeedsTarget = ClickedData->TargetType == ERTSCommandTargetType::Location ||
+                                     ClickedData->TargetType == ERTSCommandTargetType::LocationOrTarget ||
+                                     ClickedData->TargetType == ERTSCommandTargetType::TargetActor;
+
+            // Mass-only 选择下，当前没有 ActiveActor 时不能走“直接 Execute on actor”。
+            // 用于目标类命令时，进入 RTSSelector 的瞄点模式；否则直接走全局选中执行。
+            if (bNeedsTarget)
+            {
+                if (APlayerController* PC = GetOwningPlayer())
+                {
+                    if (URTSSelector* Selector = PC->FindComponentByClass<URTSSelector>())
+                    {
+                        Selector->BeginTargeting(CommandTag);
+                        return;
+                    }
+                }
+                UE_LOG(LogTemp, Warning, TEXT("RTSCommanderGridWidget: Targeting command %s ignored, selector missing."), *CommandTag.ToString());
+            }
+            else if (ActiveActor && ActiveActor->Implements<URTSCommandInterface>())
+            {
+                // 战术直达：按钮逻辑自决 (Pure Callback)
+                ClickedData->Execute(ActiveActor);
+            }
+            else
+            {
+                // Fallback for actor-less selection (pure Mass entities).
+                Selection->IssueCommand(CommandTag);
+            }
         }
     }
 }

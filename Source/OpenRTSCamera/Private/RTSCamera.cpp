@@ -2,19 +2,117 @@
 
 #define RTS_CAMERA_CPP
 #include "RTSCamera.h"
-#include "MassBattleMinimapRegion.h"
+#include "RTSCameraBoundsVolume.h"
 
 // 定义 RTSCamera 专用日志分类
 DEFINE_LOG_CATEGORY_STATIC(LogRTSCamera, Log, All);
 
 #include "Blueprint/WidgetLayoutLibrary.h"
+#include "Components/BoxComponent.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "Runtime/CoreUObject/Public/UObject/ConstructorHelpers.h"
+#include "UObject/UnrealType.h"
+
+namespace
+{
+	struct FRTSCameraBoundaryData
+	{
+		FVector Origin = FVector::ZeroVector;
+		FVector Extents = FVector::ZeroVector;
+		float MapOverflowUU = 0.0f;
+	};
+
+	bool TryResolveBoundaryData(const AActor* BoundaryActor, FRTSCameraBoundaryData& OutData)
+	{
+		if (!BoundaryActor)
+		{
+			return false;
+		}
+
+		const UClass* ActorClass = BoundaryActor->GetClass();
+		if (const FObjectPropertyBase* BoundsProperty = FindFProperty<FObjectPropertyBase>(ActorClass, TEXT("BoundsComponent")))
+		{
+			if (const UBoxComponent* BoundsComponent = Cast<UBoxComponent>(BoundsProperty->GetObjectPropertyValue_InContainer(BoundaryActor)))
+			{
+				OutData.Origin = BoundsComponent->GetComponentLocation();
+				OutData.Extents = BoundsComponent->GetScaledBoxExtent();
+			}
+		}
+
+		if (const FFloatProperty* OverflowProperty = FindFProperty<FFloatProperty>(ActorClass, TEXT("MapOverflowUU")))
+		{
+			OutData.MapOverflowUU = FMath::Max(0.0f, OverflowProperty->GetPropertyValue_InContainer(BoundaryActor));
+		}
+
+		if (OutData.Extents.IsNearlyZero())
+		{
+			const FBox ActorBounds = BoundaryActor->GetComponentsBoundingBox(true);
+			if (ActorBounds.IsValid)
+			{
+				OutData.Origin = ActorBounds.GetCenter();
+				OutData.Extents = ActorBounds.GetExtent();
+			}
+		}
+
+		return OutData.Extents.X > 0.0f && OutData.Extents.Y > 0.0f;
+	}
+
+	FString GetCleanMapName(const UWorld* World)
+	{
+		if (!World)
+		{
+			return TEXT("Default");
+		}
+
+		FString MapName = World->GetMapName();
+		MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+		return MapName.IsEmpty() ? FString(TEXT("Default")) : MapName;
+	}
+
+	bool TryLoadSection(const FConfigFile& ConfigFile, const TCHAR* SectionName, FRTSCameraBoundaryData& OutData)
+	{
+		float OriginX = 0.0f;
+		float OriginY = 0.0f;
+		float SizeX = 0.0f;
+		float SizeY = 0.0f;
+		if (!ConfigFile.GetFloat(SectionName, TEXT("OriginX"), OriginX) ||
+			!ConfigFile.GetFloat(SectionName, TEXT("OriginY"), OriginY) ||
+			!ConfigFile.GetFloat(SectionName, TEXT("SizeX"), SizeX) ||
+			!ConfigFile.GetFloat(SectionName, TEXT("SizeY"), SizeY))
+		{
+			return false;
+		}
+
+		float MapOverflowUU = 0.0f;
+		ConfigFile.GetFloat(SectionName, TEXT("MapOverflowUU"), MapOverflowUU);
+		OutData.Origin = FVector(OriginX + SizeX * 0.5f, OriginY + SizeY * 0.5f, 0.0f);
+		OutData.Extents = FVector(SizeX * 0.5f, SizeY * 0.5f, 1.0f);
+		OutData.MapOverflowUU = FMath::Max(0.0f, MapOverflowUU);
+		return OutData.Extents.X > 0.0f && OutData.Extents.Y > 0.0f;
+	}
+
+	bool TryLoadFogOfWarMapBoundsConfig(const UWorld* World, FRTSCameraBoundaryData& OutData)
+	{
+		FConfigFile ConfigFile;
+		const FString ConfigFilePath = FPaths::ProjectConfigDir() / TEXT("FogOfWarMapBounds.ini");
+		if (!FPaths::FileExists(ConfigFilePath))
+		{
+			return false;
+		}
+		ConfigFile.Read(ConfigFilePath);
+
+		const FString SectionName = FString::Printf(TEXT("MapBounds.%s"), *GetCleanMapName(World));
+		return TryLoadSection(ConfigFile, *SectionName, OutData) ||
+			TryLoadSection(ConfigFile, TEXT("MapBounds.Default"), OutData);
+	}
+}
 
 URTSCamera::URTSCamera()
 {
@@ -313,79 +411,97 @@ void URTSCamera::setupInitialSpringArmState()
 
 void URTSCamera::locateMapBoundaryVolumeByTag()
 {
-	/// 直接在世界中通过类类型检索 AMinimapRegion
+	UWorld* World = this->GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	auto InitializeBoundary = [this](const FString& SourceName, const FRTSCameraBoundaryData& BoundaryData, AActor* BoundaryActor)
+	{
+		this->movementBoundaryVolume = BoundaryActor;
+		this->bHasResolvedBoundaryData = true;
+		this->ResolvedBoundaryOrigin = BoundaryData.Origin;
+		this->ResolvedBoundaryExtents = BoundaryData.Extents;
+		this->ResolvedBoundaryOverflowUU = BoundaryData.MapOverflowUU;
+
+		const FVector logicalExtent = BoundaryData.Extents;
+		const float mapOverflowDistance = BoundaryData.MapOverflowUU;
+
+		// --- 視野溢出定量诊断 (V14 - 全程线性强稳版) ---
+		// 我们精确量化高空与低空视角的物理物性，以验证线性斜率 k。
+		if (this->cameraComponent != nullptr)
+		{
+			const float pitchAngleInRadians = FMath::DegreesToRadians(FMath::Abs(this->startingPitchAngle));
+			const float horizontalFieldOfViewHalf = FMath::DegreesToRadians(this->cameraComponent->FieldOfView) / 2.0f;
+			const FVector2D viewportSize = UWidgetLayoutLibrary::GetViewportSize(this->GetWorld());
+			const float viewportAspectRatioValue = (viewportSize.Y > 0.0f) ? (viewportSize.X / viewportSize.Y) : this->cameraComponent->AspectRatio;
+			const float verticalFieldOfViewHalf = FMath::Atan(FMath::Tan(horizontalFieldOfViewHalf) / viewportAspectRatioValue);
+
+			auto calculateReachForLength = [&](float length) {
+				const float z = length * FMath::Sin(pitchAngleInRadians);
+				const float slant = z / FMath::Sin(pitchAngleInRadians + verticalFieldOfViewHalf);
+				const float lateralReach = slant * FMath::Tan(horizontalFieldOfViewHalf);
+				const float forwardReach = slant * FMath::Cos(pitchAngleInRadians + verticalFieldOfViewHalf);
+				return FVector(z, lateralReach, forwardReach);
+			};
+
+			const FVector maxPhysics = calculateReachForLength(this->maximumZoomLength);
+			const FVector minPhysics = calculateReachForLength(this->minimumZoomLength);
+
+			const float maxPhysicsX = maxPhysics.Z;
+			const float maxPhysicsY = maxPhysics.Y;
+			const float slantBottom = maxPhysics.X / FMath::Sin(pitchAngleInRadians - verticalFieldOfViewHalf);
+			const float backwardReach = slantBottom * FMath::Cos(pitchAngleInRadians - verticalFieldOfViewHalf);
+
+			this->lateralReachFactor = maxPhysicsY / this->maximumZoomLength;
+			this->forwardReachFactor = maxPhysicsX / this->maximumZoomLength;
+			this->backwardReachFactor = backwardReach / this->maximumZoomLength;
+
+			const float lateralAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->lateralReachFactor));
+			const float forwardAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->forwardReachFactor));
+			const float backwardAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->backwardReachFactor));
+
+			UE_LOG(LogRTSCamera, Warning, TEXT("=== 边界溢出诊断报告 (V14 - 全程线性版) ==="));
+			UE_LOG(LogRTSCamera, Warning, TEXT("俯仰基准: %.1f | 溢出阈值 (MapOverflowUU): %.1f"), this->startingPitchAngle, mapOverflowDistance);
+			UE_LOG(LogRTSCamera, Warning, TEXT("[预计算系数] Lateral: %.4f (%.2f°) | Forward: %.4f (%.2f°) | Backward: %.4f (%.2f°)"),
+				this->lateralReachFactor, lateralAngleDeg, this->forwardReachFactor, forwardAngleDeg, this->backwardReachFactor, backwardAngleDeg);
+			UE_LOG(LogRTSCamera, Warning, TEXT("========================================="));
+		}
+
+		UE_LOG(LogRTSCamera, Log, TEXT("RTSCamera 初始化: 边界源 [%s], 逻辑边界: %.1f x %.1f, 溢出保护: %.1f"),
+			*SourceName, logicalExtent.X * 2.0f, logicalExtent.Y * 2.0f, BoundaryData.MapOverflowUU);
+		this->updateMinimapFrustum();
+	};
+
+	FRTSCameraBoundaryData ConfigBoundaryData;
+	if (TryLoadFogOfWarMapBoundsConfig(World, ConfigBoundaryData))
+	{
+		InitializeBoundary(TEXT("FogOfWarMapBounds.ini"), ConfigBoundaryData, nullptr);
+		return;
+	}
+
 	TArray<AActor*> foundActors;
-	UGameplayStatics::GetAllActorsOfClass(
-		this->GetWorld(),
-		AMinimapRegion::StaticClass(),
-		foundActors
-	);
+	UGameplayStatics::GetAllActorsOfClass(World, ARTSCameraBoundsVolume::StaticClass(), foundActors);
+
+	if (foundActors.Num() == 0)
+	{
+		UGameplayStatics::GetAllActorsWithTag(World, FName("OpenRTSCamera#CameraBounds"), foundActors);
+	}
 
 	if (foundActors.Num() > 0)
 	{
-		this->movementBoundaryVolume = foundActors[0];
-		if (AMinimapRegion* minimapRegion = Cast<AMinimapRegion>(this->movementBoundaryVolume)) 
+		for (AActor* CandidateBoundary : foundActors)
 		{
-			const FVector logicalExtent = minimapRegion->BoundsComponent->GetScaledBoxExtent();
-			const float mapOverflowDistance = minimapRegion->MapOverflowUU;
-			
-			// --- 視野溢出定量诊断 (V14 - 全程线性强稳版) ---
-			// 我们精确量化高空与低空视角的物理物性，以验证线性斜率 k。
-			if (this->cameraComponent != nullptr)
+			FRTSCameraBoundaryData BoundaryData;
+			if (!TryResolveBoundaryData(CandidateBoundary, BoundaryData))
 			{
-				const float pitchAngleInRadians = FMath::DegreesToRadians(FMath::Abs(this->startingPitchAngle));
-				const float horizontalFieldOfViewHalf = FMath::DegreesToRadians(this->cameraComponent->FieldOfView) / 2.0f;
-				const FVector2D viewportSize = UWidgetLayoutLibrary::GetViewportSize(this->GetWorld());
-				const float viewportAspectRatioValue = (viewportSize.Y > 0.0f) ? (viewportSize.X / viewportSize.Y) : this->cameraComponent->AspectRatio;
-				const float verticalFieldOfViewHalf = FMath::Atan(FMath::Tan(horizontalFieldOfViewHalf) / viewportAspectRatioValue);
-				
-				// 辅助计算闭包函数 (用于获取任意高度下的视野属性)
-				auto calculateReachForLength = [&](float length) {
-					const float z = length * FMath::Sin(pitchAngleInRadians);
-					const float slant = z / FMath::Sin(pitchAngleInRadians + verticalFieldOfViewHalf);
-					const float lateralReach = slant * FMath::Tan(horizontalFieldOfViewHalf);
-					const float forwardReach = slant * FMath::Cos(pitchAngleInRadians + verticalFieldOfViewHalf);
-					return FVector(z, lateralReach, forwardReach);
-				};
-
-				const FVector maxPhysics = calculateReachForLength(this->maximumZoomLength); 
-				const FVector minPhysics = calculateReachForLength(this->minimumZoomLength);
-
-				const float maxPhysicsX = maxPhysics.Z; // 南北延伸 (Forward Reach)
-				const float maxPhysicsY = maxPhysics.Y; // 东西跨度 (Lateral Reach)
-				
-				// 计算后向延伸 (Backward Reach)
-				const float slantBottom = maxPhysics.X / FMath::Sin(pitchAngleInRadians - verticalFieldOfViewHalf);
-				const float backwardReach = slantBottom * FMath::Cos(pitchAngleInRadians - verticalFieldOfViewHalf);
-
-				this->lateralReachFactor = maxPhysicsY / this->maximumZoomLength;
-				this->forwardReachFactor = maxPhysicsX / this->maximumZoomLength;
-				this->backwardReachFactor = backwardReach / this->maximumZoomLength;
-
-				const float lateralAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->lateralReachFactor));
-				const float forwardAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->forwardReachFactor));
-				const float backwardAngleDeg = FMath::RadiansToDegrees(FMath::Atan(this->backwardReachFactor));
-
-				UE_LOG(LogRTSCamera, Warning, TEXT("=== 边界溢出诊断报告 (V14 - 全程线性版) ==="));
-				UE_LOG(LogRTSCamera, Warning, TEXT("俯仰基准: %.1f | 溢出阈值 (MapOverflowUU): %.1f"), this->startingPitchAngle, mapOverflowDistance);
-				UE_LOG(LogRTSCamera, Warning, TEXT("[预计算系数] Lateral: %.4f (%.2f°) | Forward: %.4f (%.2f°) | Backward: %.4f (%.2f°)"), 
-					this->lateralReachFactor, lateralAngleDeg, this->forwardReachFactor, forwardAngleDeg, this->backwardReachFactor, backwardAngleDeg);
-				const float minPhysicsX = minPhysics.Z;
-				const float minPhysicsY = minPhysics.Y;
-
-				UE_LOG(LogRTSCamera, Warning, TEXT("[高空 Zmax=%.1f] 东西补偿 (Reach-O): %.1f | 南北补偿 (Reach-O): %.1f"), maxPhysics.X, maxPhysicsY - mapOverflowDistance, maxPhysicsX - mapOverflowDistance);
-				UE_LOG(LogRTSCamera, Warning, TEXT("[低空 Zmin=%.1f] 东西补偿 (Reach-O): %.1f | 南北补偿 (Reach-O): %.1f"), minPhysics.X, minPhysicsY - mapOverflowDistance, minPhysicsX - mapOverflowDistance);
-				UE_LOG(LogRTSCamera, Warning, TEXT("--- 线性偏置计算 (y = kz + b) ---"));
-				UE_LOG(LogRTSCamera, Warning, TEXT("东西向 (Y) 补偿范围: %.1f -> %.1f"), minPhysics.Y - mapOverflowDistance, maxPhysics.Y - mapOverflowDistance);
-				UE_LOG(LogRTSCamera, Warning, TEXT("南北向 (X) 补偿范围: %.1f -> %.1f"), minPhysics.Z - mapOverflowDistance, maxPhysics.Z - mapOverflowDistance);
-				UE_LOG(LogRTSCamera, Warning, TEXT("========================================="));
+				continue;
 			}
 
-			// 还原基础初始化信息日志
-			UE_LOG(LogRTSCamera, Log, TEXT("RTSCamera 初始化: 挂载 [%s], 逻辑边界: %.1f x %.1f, 溢出保护: %.1f"), 
-				*minimapRegion->GetName(), logicalExtent.X * 2.0f, logicalExtent.Y * 2.0f, minimapRegion->MapOverflowUU);
+			InitializeBoundary(CandidateBoundary->GetName(), BoundaryData, CandidateBoundary);
+			return;
 		}
-		this->updateMinimapFrustum();
 	}
 }
 
@@ -650,24 +766,23 @@ void URTSCamera::updateMinimapFrustum()
 
 void URTSCamera::applyBoundaryConstraints()
 {
-	if (this->movementBoundaryVolume == nullptr || this->springArmComponent == nullptr)
+	if ((!this->bHasResolvedBoundaryData && this->movementBoundaryVolume == nullptr) || this->springArmComponent == nullptr)
 	{
 		return;
 	}
 
 	// 1. 获取边界数据
-	FVector boxOrigin = FVector::ZeroVector;
-	FVector boxExtents = FVector::ZeroVector;
-	if (const AMinimapRegion* minimapRegion = Cast<AMinimapRegion>(this->movementBoundaryVolume))
+	FRTSCameraBoundaryData BoundaryData;
+	if (this->bHasResolvedBoundaryData)
 	{
-		if (minimapRegion->BoundsComponent != nullptr)
-		{
-			boxExtents = minimapRegion->BoundsComponent->GetScaledBoxExtent();
-			boxOrigin = minimapRegion->BoundsComponent->GetComponentLocation();
-		}
+		BoundaryData.Origin = this->ResolvedBoundaryOrigin;
+		BoundaryData.Extents = this->ResolvedBoundaryExtents;
+		BoundaryData.MapOverflowUU = this->ResolvedBoundaryOverflowUU;
 	}
-
-	if (boxExtents.IsZero()) return;
+	else if (!TryResolveBoundaryData(this->movementBoundaryVolume, BoundaryData))
+	{
+		return;
+	}
 
 	// 2. 地形高度同步 (取代 Tick 中的独立调用)
 	this->rectifyRootHeightFromTerrain();
@@ -681,22 +796,27 @@ void URTSCamera::applyBoundaryConstraints()
 
 	// 4. Root 物理坐标锁定 (核心：边界限制永远生效，Flag 仅控制是否产生 Offset)
 	FVector clampedLocation = currentPos;
-	clampedLocation.X = FMath::Clamp(clampedLocation.X, boxOrigin.X - boxExtents.X, boxOrigin.X + boxExtents.X);
-	clampedLocation.Y = FMath::Clamp(clampedLocation.Y, boxOrigin.Y - boxExtents.Y, boxOrigin.Y + boxExtents.Y);
+	clampedLocation.X = FMath::Clamp(clampedLocation.X, BoundaryData.Origin.X - BoundaryData.Extents.X, BoundaryData.Origin.X + BoundaryData.Extents.X);
+	clampedLocation.Y = FMath::Clamp(clampedLocation.Y, BoundaryData.Origin.Y - BoundaryData.Extents.Y, BoundaryData.Origin.Y + BoundaryData.Extents.Y);
 	
 	this->rootComponent->SetWorldLocation(clampedLocation);
 }
 
 float URTSCamera::calculateYOffset(float worldY) const
 {
-	if (!this->bEnableYBoundaryConstraint || this->movementBoundaryVolume == nullptr) return 0.0f;
+	if (!this->bEnableYBoundaryConstraint || (!this->bHasResolvedBoundaryData && this->movementBoundaryVolume == nullptr)) return 0.0f;
 
-	const AMinimapRegion* minimapRegion = Cast<AMinimapRegion>(this->movementBoundaryVolume);
-	if (!minimapRegion || !minimapRegion->BoundsComponent) return 0.0f;
+	FRTSCameraBoundaryData BoundaryData;
+	if (this->bHasResolvedBoundaryData)
+	{
+		BoundaryData.Origin = this->ResolvedBoundaryOrigin;
+		BoundaryData.Extents = this->ResolvedBoundaryExtents;
+		BoundaryData.MapOverflowUU = this->ResolvedBoundaryOverflowUU;
+	}
+	else if (!TryResolveBoundaryData(this->movementBoundaryVolume, BoundaryData)) return 0.0f;
 
-	const FVector boxOrigin = minimapRegion->BoundsComponent->GetComponentLocation();
-	const FVector boxExtents = minimapRegion->BoundsComponent->GetScaledBoxExtent();
-	const float mapOverflow = minimapRegion->MapOverflowUU;
+	const FVector boxOrigin = BoundaryData.Origin;
+	const FVector boxExtents = BoundaryData.Extents;
 
 	const float differenceY = worldY - boxOrigin.Y;
 	const float normalizedDistanceY = FMath::Abs(differenceY) / FMath::Max(boxExtents.Y, 1.0f);
@@ -717,14 +837,19 @@ float URTSCamera::calculateYOffset(float worldY) const
 
 float URTSCamera::calculateXOffset(float worldX) const
 {
-	if (!this->bEnableXBoundaryConstraint || this->movementBoundaryVolume == nullptr) return 0.0f;
+	if (!this->bEnableXBoundaryConstraint || (!this->bHasResolvedBoundaryData && this->movementBoundaryVolume == nullptr)) return 0.0f;
 
-	const AMinimapRegion* minimapRegion = Cast<AMinimapRegion>(this->movementBoundaryVolume);
-	if (!minimapRegion || !minimapRegion->BoundsComponent) return 0.0f;
+	FRTSCameraBoundaryData BoundaryData;
+	if (this->bHasResolvedBoundaryData)
+	{
+		BoundaryData.Origin = this->ResolvedBoundaryOrigin;
+		BoundaryData.Extents = this->ResolvedBoundaryExtents;
+		BoundaryData.MapOverflowUU = this->ResolvedBoundaryOverflowUU;
+	}
+	else if (!TryResolveBoundaryData(this->movementBoundaryVolume, BoundaryData)) return 0.0f;
 
-	const FVector boxOrigin = minimapRegion->BoundsComponent->GetComponentLocation();
-	const FVector boxExtents = minimapRegion->BoundsComponent->GetScaledBoxExtent();
-	const float mapOverflow = minimapRegion->MapOverflowUU;
+	const FVector boxOrigin = BoundaryData.Origin;
+	const FVector boxExtents = BoundaryData.Extents;
 
 	const float differenceX = worldX - boxOrigin.X;
 	const float normalizedDistanceX = FMath::Abs(differenceX) / FMath::Max(boxExtents.X, 1.0f);

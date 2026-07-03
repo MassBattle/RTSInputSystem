@@ -3,7 +3,10 @@
 #include "UI/RTSCameraMinimapWidget.h"
 #include "RTSCamera.h"
 #include "OpenRTSCamera.h"
+#include "Camera/CameraComponent.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Rendering/DrawElements.h"
 

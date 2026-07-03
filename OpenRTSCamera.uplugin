@@ -28,11 +28,11 @@
 			"Enabled": true
 		},
 		{
-			"Name": "MassBattleMinimap",
+			"Name": "MassBattle",
 			"Enabled": true
 		},
 		{
-			"Name": "LandmarkSystem",
+			"Name": "MassGameplay",
 			"Enabled": true
 		}
 	],

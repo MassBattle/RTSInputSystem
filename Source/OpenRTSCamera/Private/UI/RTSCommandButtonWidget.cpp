@@ -6,6 +6,7 @@
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Interfaces/RTSCommandInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UI/RTSCommanderGridWidget.h"
 
 void URTSCommandButtonWidget::NativeConstruct()

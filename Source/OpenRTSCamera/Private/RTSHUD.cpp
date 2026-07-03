@@ -1,11 +1,9 @@
 #include "RTSHUD.h"
 #include "RTSSelectionSubsystem.h"
 #include "RTSSelectable.h"
-#include "MassBattleFuncLib.h"
+#include "FuncLibs/MassBattleFuncLib.h"
 #include "RTSSelector.h"
 #include "Engine/Canvas.h"
-#include "LandmarkSubsystem.h"
-#include "LandmarkTypes.h"
 #include "Interfaces/RTSCommandInterface.h"
 #include "Data/RTSCommandGridAsset.h"
 #include "Engine/Texture2D.h"
@@ -41,35 +39,6 @@ void ARTSHUD::DrawHUD()
 	{
 		PerformSelection();
         bIsPerformingSelection = false; // CRITICAL: Reset the flag to stop continuous selection
-	}
-
-	// --- Landmark System Integration ---
-	if (APlayerController* PC = GetOwningPlayerController())
-	{
-		if (UWorld* World = GetWorld())
-		{
-			if (ULandmarkSubsystem* LandmarkSys = World->GetSubsystem<ULandmarkSubsystem>())
-			{
-				// 1. Calculate Camera State
-				FVector CamLoc;
-				FRotator CamRot;
-				PC->GetPlayerViewPoint(CamLoc, CamRot);
-
-				// specific logic for OpenRTSCamera: Height is usually Z.
-				const float MinHeight = 500.0f;
-				const float MaxHeight = 10000.0f;
-				float ZoomFactor = FMath::Clamp((CamLoc.Z - MinHeight) / (MaxHeight - MinHeight), 0.0f, 1.0f);
-
-				// 2. Update Subsystem
-				LandmarkSys->UpdateCameraState(CamLoc, CamRot, 90.0f, ZoomFactor);
-
-				// 3. Delegate Drawing to Subsystem (It handles the HUD layer for landmarks)
-                if (Canvas)
-                {
-                    LandmarkSys->DrawLandmarks(Canvas);
-                }
-			}
-		}
 	}
 
 	// --- Input Polling (One-Step Solution) ---
@@ -312,7 +281,7 @@ void ARTSHUD::PerformSelection_Implementation()
 	bIsPerformingSelection = false;
 }
 
-#include "MassBattleFuncLib.h"
+#include "FuncLibs/MassBattleFuncLib.h"
 #include "MassBattleStructs.h"
 
 void ARTSHUD::PerformMassSelection(TArray<FEntityHandle>& OutEntities)
@@ -377,8 +346,8 @@ void ARTSHUD::PerformMassSelection(TArray<FEntityHandle>& OutEntities)
 
 #if WITH_EDITOR
 		FTraceDrawDebugConfig DebugCfg;
-		DebugCfg.bDrawDebugShape = true;
-		DebugCfg.Duration = 2.0f;
+		DebugCfg.bDrawDebugShape = false;
+		DebugCfg.Duration = 1.0f;
 		UMassBattleFuncLib::ViewTraceForAgents(this, bHit, Results, LocalKeepCount, TracePoints, false, FVector::ZeroVector, 1.0f, SortMode,
 			FVector::ZeroVector, FEntityArray(), FMassBattleQuery(), DebugCfg);
 #else

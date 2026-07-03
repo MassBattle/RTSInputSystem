@@ -4,8 +4,13 @@
 
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "Engine/LocalPlayer.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "RTSSelectable.h"
+#include "RTSSelectionSubsystem.h"
 #include "Kismet/GameplayStatics.h"
+#include "UObject/ConstructorHelpers.h"
 
 // Sets default values for this component's properties
 URTSSelector::URTSSelector(): PlayerController(nullptr), HUD(nullptr), bIsSelecting(false)
@@ -21,6 +26,13 @@ URTSSelector::URTSSelector(): PlayerController(nullptr), HUD(nullptr), bIsSelect
 		InputMappingContextFinder(TEXT("/OpenRTSCamera/Inputs/OpenRTSCameraInputs"));
 	this->BeginSelection = BeginSelectionActionFinder.Object;
 	this->InputMappingContext = InputMappingContextFinder.Object;
+
+	static ConstructorHelpers::FObjectFinder<UInputAction>
+		IssueCommandActionFinder(TEXT("/OpenRTSCamera/Inputs/IssueCommand"));
+	if (IssueCommandActionFinder.Succeeded())
+	{
+		this->IssueCommandAction = IssueCommandActionFinder.Object;
+	}
 }
 
 
@@ -115,6 +127,10 @@ void URTSSelector::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	{
 		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Started, this, &URTSSelector::OnSelectionStart);
 		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Completed, this, &URTSSelector::OnSelectionEnd);
+		if (this->IssueCommandAction)
+		{
+			InputComponent->BindAction(this->IssueCommandAction, ETriggerEvent::Started, this, &URTSSelector::OnIssueCommand);
+		}
 	}
 }
 
@@ -142,6 +158,27 @@ void URTSSelector::BindInputActions()
 			this,
 			&URTSSelector::OnSelectionEnd
 		);
+
+		if (!this->IssueCommandAction)
+		{
+			// Dynamically load it in case the CDO failed to find it during editor startup
+			this->IssueCommandAction = Cast<UInputAction>(StaticLoadObject(UInputAction::StaticClass(), nullptr, TEXT("/Script/EnhancedInput.InputAction'/OpenRTSCamera/Inputs/IssueCommand.IssueCommand'")));
+		}
+
+		if (this->IssueCommandAction)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RTSSelector] IssueCommandAction BOUND SUCCESSFULLY!"));
+			EnhancedInputComponent->BindAction(
+				this->IssueCommandAction,
+				ETriggerEvent::Started,
+				this,
+				&URTSSelector::OnIssueCommand
+			);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[RTSSelector] IssueCommandAction is NULL! Ensure it exists at /OpenRTSCamera/Inputs/IssueCommand"));
+		}
 	}
 }
 
@@ -163,8 +200,116 @@ void URTSSelector::BindInputMappingContext()
 	}
 }
 
+void URTSSelector::BeginTargeting(FGameplayTag CommandTag)
+{
+	bIsTargeting = true;
+	PendingCommandTag = CommandTag;
+	// Optional: Change mouse cursor to crosshair here
+	if (PlayerController)
+	{
+		PlayerController->CurrentMouseCursor = EMouseCursor::Crosshairs;
+	}
+}
+
+void URTSSelector::CancelTargeting()
+{
+	bIsTargeting = false;
+	PendingCommandTag = FGameplayTag::EmptyTag;
+	if (PlayerController)
+	{
+		PlayerController->CurrentMouseCursor = EMouseCursor::Default;
+	}
+}
+
+void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
+{
+	if (!PlayerController) return;
+
+	FHitResult Hit;
+	PlayerController->GetHitResultUnderCursor(ECC_Visibility, false, Hit);
+
+	UE_LOG(LogTemp, Warning, TEXT("[RTSSelector] OnIssueCommand TRIGGERED! bBlockingHit: %d, Location: %s"), Hit.bBlockingHit, *Hit.Location.ToString());
+
+	if (bIsTargeting)
+	{
+		if (Hit.bBlockingHit)
+		{
+			if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
+			{
+				if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
+				{
+					const FGameplayTag AttackTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
+					if (PendingCommandTag == AttackTag && Hit.GetActor())
+					{
+						SelectionSubsystem->IssueCommandWithTarget(PendingCommandTag, Hit.GetActor());
+					}
+					else
+					{
+						SelectionSubsystem->IssueCommandWithLocation(PendingCommandTag, Hit.Location);
+					}
+				}
+			}
+		}
+
+		CancelTargeting(); // Right click also resolves targeting command.
+		return;
+	}
+
+	if (Hit.bBlockingHit)
+	{
+		if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
+		{
+			if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
+			{
+				// Smart Command Mapping:
+				// If we right click an actor, maybe we Attack?
+				// For simplicity, we just send Move to location. If it's an enemy, the user might want Attack.
+				// The Move command handles location by default.
+				SelectionSubsystem->IssueCommandWithLocation(FGameplayTag::RequestGameplayTag(FName("RTS.Command.Move"), false), Hit.Location);
+			}
+		}
+	}
+
+	CancelTargeting(); // Right click cancels any active targeting
+}
+
 void URTSSelector::OnSelectionStart(const FInputActionValue& Value)
 {
+	if (bIsTargeting)
+	{
+		bSkipCurrentSelectionClick = true;
+
+		if (PlayerController)
+		{
+			FHitResult Hit;
+			PlayerController->GetHitResultUnderCursor(ECC_Visibility, false, Hit);
+			if (Hit.bBlockingHit)
+			{
+				if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
+				{
+					if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
+					{
+						// Issue command with location or target actor
+						// For now, always use location, as Mass Agents can move to a location.
+						const FGameplayTag AttackTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
+						if (PendingCommandTag == AttackTag && Hit.GetActor())
+						{
+							SelectionSubsystem->IssueCommandWithTarget(PendingCommandTag, Hit.GetActor());
+						}
+						else
+						{
+							SelectionSubsystem->IssueCommandWithLocation(PendingCommandTag, Hit.Location);
+						}
+					}
+				}
+			}
+		}
+
+		CancelTargeting();
+		return;
+	}
+
+	bSkipCurrentSelectionClick = false;
 	FVector2D MousePosition;
 	PlayerController->GetMousePosition(MousePosition.X, MousePosition.Y);
 	HUD->BeginSelection(MousePosition);
@@ -172,6 +317,7 @@ void URTSSelector::OnSelectionStart(const FInputActionValue& Value)
 
 void URTSSelector::OnUpdateSelection(const FInputActionValue& Value)
 {
+	if (bSkipCurrentSelectionClick) return;
 	FVector2D MousePosition;
 	PlayerController->GetMousePosition(MousePosition.X, MousePosition.Y);
 	SelectionEnd = MousePosition;
@@ -180,10 +326,11 @@ void URTSSelector::OnUpdateSelection(const FInputActionValue& Value)
 
 void URTSSelector::OnSelectionEnd(const FInputActionValue& Value)
 {
+	if (bSkipCurrentSelectionClick) return;
 	// Call PerformSelection on the HUD to execute selection logic
 	HUD->EndSelection();
 }
 
 bool URTSSelector::CanSelectActor_Implementation(AActor *Actor) const {
-	return true;	
+	return true;
 }

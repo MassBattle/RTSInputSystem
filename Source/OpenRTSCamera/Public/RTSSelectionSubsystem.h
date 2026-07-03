@@ -83,6 +83,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "RTS Selection")
     void IssueCommand(FGameplayTag CommandTag);
 
+    /**
+     * Issues a command targeting a specific location to all selected units.
+     */
+    UFUNCTION(BlueprintCallable, Category = "RTS Selection")
+    void IssueCommandWithLocation(FGameplayTag CommandTag, FVector Location);
+
+    /**
+     * Issues a command targeting a specific actor to all selected units.
+     */
+    UFUNCTION(BlueprintCallable, Category = "RTS Selection")
+    void IssueCommandWithTarget(FGameplayTag CommandTag, AActor* TargetActor);
+
 	UFUNCTION(BlueprintCallable, Category = "RTS Selection")
 	bool HasSelectedActors() const { return SelectedActors.Num() > 0; }
 

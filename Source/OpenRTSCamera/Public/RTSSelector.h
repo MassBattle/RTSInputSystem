@@ -30,6 +30,27 @@ public:
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Inputs")
 	UInputAction* BeginSelection;
 
+	// Action for right clicking to issue a smart command
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Inputs")
+	UInputAction* IssueCommandAction;
+
+	// --- Targeting State (for Targeted Commands like Move/Attack) ---
+	UPROPERTY(BlueprintReadWrite, Category = "RTSCamera - Selection")
+	bool bIsTargeting = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "RTSCamera - Selection")
+	FGameplayTag PendingCommandTag;
+
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	void BeginTargeting(FGameplayTag CommandTag);
+
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	void CancelTargeting();
+
+	// Input Action handler for Right Click
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	void OnIssueCommand(const FInputActionValue& Value);
+
 	// Function to clear selected actors, can be overridden in Blueprints
 	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "RTSCamera - Selection")
 	void ClearSelectedActors();
@@ -71,6 +92,7 @@ private:
 	FVector2D SelectionEnd;
 
 	bool bIsSelecting;
+	bool bSkipCurrentSelectionClick = false;
 
 	void BindInputActions();
 	void BindInputMappingContext();

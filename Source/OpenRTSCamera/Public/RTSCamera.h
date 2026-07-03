@@ -331,6 +331,11 @@ protected:
 	UPROPERTY()
 	AActor* movementBoundaryVolume;
 
+	bool bHasResolvedBoundaryData = false;
+	FVector ResolvedBoundaryOrigin = FVector::ZeroVector;
+	FVector ResolvedBoundaryExtents = FVector::ZeroVector;
+	float ResolvedBoundaryOverflowUU = 0.0f;
+
 	/// 玩家输入的理想缩放目标高度，视野计算将优先同步此意图而非物理插值过程
 	UPROPERTY()
 	float desiredZoomLength;
