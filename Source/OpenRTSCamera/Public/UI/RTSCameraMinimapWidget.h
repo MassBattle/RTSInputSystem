@@ -7,14 +7,12 @@
 #include "RTSCameraMinimapWidget.generated.h"
 
 class URTSCamera;
-class UCameraComponent;
-class USpringArmComponent;
 
 /**
  * URTSCameraMinimapWidget
  * 
  * A widget that visualizes the RTS Camera's Field of View on a minimap.
- * It uses the Camera's BoundaryVolume to determine the coordinate system.
+ * It uses the RTSCamera resolved MapRegion to determine the coordinate system.
  * It handles input to move the camera (JumpTo).
  */
 UCLASS(BlueprintType, Blueprintable)
@@ -57,6 +55,11 @@ private:
 	 **/
 	void handleMinimapFrustumUpdated();
 
+	/**
+	 * @brief       读取 RTS 相机当前使用的地图坐标系。
+	 **/
+	bool getCurrentBounds(FVector& OutOrigin, FVector& OutExtent) const;
+
 	/** Convert World Location (XY) to Widget Local Coordinates (UV * Size) */
 	FVector2D ConvertWorldToWidgetLocal(const FVector2D& WorldPos, const FVector2D& WidgetSize) const;
 
@@ -67,23 +70,6 @@ protected:
 	/** @brief 缓存的 RTS 相机组件引用 */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "RTSCamera|Cache")
 	TObjectPtr<URTSCamera> cachedRTSCamera;
-
-	/** @brief 缓存的相机渲染组件，作为视场角(FOV)的原始依据 */
-	UPROPERTY(Transient, BlueprintReadOnly, Category = "RTSCamera|Cache")
-	TObjectPtr<UCameraComponent> cachedCameraComponent;
-
-	/** @brief 缓存的弹簧臂组件，作为相机缩放与倾斜的物理依据 */
-	UPROPERTY(Transient, BlueprintReadOnly, Category = "RTSCamera|Cache")
-	TObjectPtr<USpringArmComponent> cachedSpringArm;
-
-	/// 地图边界的中心点缓存
-	FVector cachedBoundsOrigin = FVector::ZeroVector;
-	
-	/// 地图边界的延伸范围缓存
-	FVector cachedBoundsExtent = FVector(100.f, 100.f, 100.f);
-	
-	/// 标识当前缓存的地图边界数据是否有效
-	bool bHasValidBounds = false;
 
 	/// 状态位：标识玩家当前是否正在通过鼠标在控件上执行位置拖拽
 	bool bIsDragging = false;

@@ -111,6 +111,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "RTS Selection")
     const TArray<AActor*>& GetSelectedActors() const { return SelectedActors; }
 
+	/** 返回当前选中的 Mass 实体列表。 */
+	UFUNCTION(BlueprintCallable, Category = "RTS Selection")
+	TArray<FEntityHandle> GetSelectedEntities() const { return SelectedEntities; }
+
+	/** 返回当前 Tab 聚焦的分组 Key。 */
+	UFUNCTION(BlueprintCallable, Category = "RTS Selection")
+	FString GetActiveGroupKey() const;
+
+	/** 返回当前 Tab 聚焦分组内的 Mass 实体；没有聚焦分组时返回全部 Mass 选择。 */
+	UFUNCTION(BlueprintCallable, Category = "RTS Selection")
+	TArray<FEntityHandle> GetActiveMassEntities() const;
+
     /** 
      * 获取当前“激活”的 Actor (即当前选中组的代表)
      * 在 Direct Callback 模式下，它作为按钮执行的主要上下文。
@@ -138,12 +150,19 @@ private:
     UPROPERTY()
     TObjectPtr<class URTSCommandGridAsset> DefaultGridNative;
 
+	UPROPERTY()
+	TMap<int32, TObjectPtr<class URTSCommandGridAsset>> MassProtocolGridCache;
+
 	int32 CurrentGroupIndex = 0;
 
 	// Helpers
-	FRTSUnitData CreateUnitDataFromActor(AActor* Actor);
-	FRTSUnitData CreateUnitDataFromEntity(const FEntityHandle& Handle);
-
-	// Thresholds
-	const int32 ListModeMaxCount = 12;
+	FRTSUnitData CreateUnitDataFromActor(AActor* Actor) const;
+	FRTSUnitData CreateUnitDataFromEntity(const FEntityHandle& Handle) const;
+	FRTSSelectionView BuildSelectionView();
+	void BroadcastSelectionViewAndGrid(const FRTSSelectionView& View);
+	void AddOrUpdateSummaryGroup(TMap<FString, FRTSUnitData>& GroupMap, const FRTSUnitData& Data);
+	bool ResolveMassProtocolCommandGrid(const FString& ActiveKey, class URTSCommandGridAsset*& OutGrid);
+	FString GetMassSubtypeDisplayName(int32 SubTypeIndex) const;
+	UTexture2D* GetMassSubtypeUnitPanelIcon(int32 SubTypeIndex) const;
+	UTexture2D* GetMassSubtypeUnitAvatar(int32 SubTypeIndex) const;
 };

@@ -3,18 +3,23 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "MassEntityTypes.h"
 #include "MassAPIStructs.h"
+#include "UObject/SoftObjectPtr.h"
 #include "RTSSelectionStructs.generated.h"
 
 class UTexture2D;
+class USoundBase;
+class URTSCommandGridAsset;
 
 UENUM(BlueprintType)
 enum class ERTSSelectionMode : uint8
 {
-	Single      UMETA(DisplayName = "Single Unit"),
-	List        UMETA(DisplayName = "Unit List"), // < 12 units
-	Summary     UMETA(DisplayName = "Group Summary") // > 12 units
+	Empty   = 0 UMETA(DisplayName = "No Selection"),
+	Single  = 1 UMETA(DisplayName = "Single Unit"),
+	List    = 2 UMETA(DisplayName = "Unit List"),
+	Summary = 3 UMETA(DisplayName = "Group Summary")
 };
 
 UENUM(BlueprintType)
@@ -37,7 +42,43 @@ struct FRTSUnitData
 	FString Name;
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FString GroupKey;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FString TypeKey;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	int32 SubTypeIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FGameplayTag UnitTypeTag;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FString Role;
+
+	/** Small unit icon used inside the RTS unit panel, selection grid, and summary cells. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	UTexture2D* Icon = nullptr;
+
+	/** Larger avatar/portrait for the left-side single-selection detail panel. Kept separate from Icon. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	UTexture2D* Portrait = nullptr;
+
+	/** Lightweight announcer cue key for UI/audio systems. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FName AnnouncerId;
+
+	/** Optional selected voice asset. Soft so protocol data can be pushed without forcing all audio loaded. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	TSoftObjectPtr<USoundBase> SelectionSound;
+
+	/** Optional command acknowledgement voice asset. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	TSoftObjectPtr<USoundBase> ConfirmationSound;
+
+	/** Command grid associated with this type, when one is authored as an asset. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	TSoftObjectPtr<URTSCommandGridAsset> CommandGrid;
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	int32 Count = 1; // 1 for individual unit, >1 for group summary
@@ -73,6 +114,7 @@ struct FRTSUnitData
 	FRTSUnitData()
 	{
 		Name = TEXT("Unknown");
+		GroupKey = TEXT("Unknown");
 	}
 };
 
@@ -85,14 +127,16 @@ struct FRTSSelectionView
 	GENERATED_BODY()
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
-	ERTSSelectionMode Mode = ERTSSelectionMode::Single;
+	ERTSSelectionMode Mode = ERTSSelectionMode::Empty;
 
 
-	// Used when Mode == Single. Contains detailed info.
+	// Used only when Mode == Single. Contains detailed info.
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	FRTSUnitData SingleUnit;
 
-	// Used when Mode == List (Individual items, Count=1) OR Summary (Grouped items, Count>1)
+	// Used when Mode == List (individual items, Count=1) or Summary (grouped items, Count>1).
+	// For Single, this may contain the single unit for consumers that need the current item/style.
+	// For Empty, this must be empty.
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	TArray<FRTSUnitData> Items;
 

@@ -8,13 +8,16 @@
 #include "Data/RTSCommandGridAsset.h"
 #include "Engine/Texture2D.h"
 #include "GameFramework/PlayerController.h"
+#include "MassEntitySubsystem.h"
+#include "MassEntityManager.h"
+#include "Fragments/SubType.h"
 
 // Constructor implementation: Initializes default values.
 ARTSHUD::ARTSHUD()
 {
-	SelectionBoxColor = FLinearColor::Green;
-	SelectionBoxFillColor = FLinearColor(0.0f, 1.0f, 0.0f, 0.15f);
-	SelectionBoxThickness = 1.0f;
+	SelectionBoxColor = FLinearColor(0.0f, 0.78f, 1.0f, 0.95f);
+	SelectionBoxFillColor = FLinearColor(0.0f, 0.35f, 0.85f, 0.12f);
+	SelectionBoxThickness = 2.0f;
 	MinSelectionSizeSq = 1.0f; // 1 pixel threshold as requested
 	bIsDrawingSelectionBox = false;
 	bIsPerformingSelection = false;
@@ -28,7 +31,12 @@ void ARTSHUD::DrawHUD()
 	// Draw the selection box if it's active AND large enough to be a box.
 	if (bIsDrawingSelectionBox)
 	{
-		if (FVector2D::DistSquared(SelectionStart, SelectionEnd) > MinSelectionSizeSq)
+		const APlayerController* PC = GetOwningPlayerController();
+		if (!PC || !PC->IsInputKeyDown(EKeys::LeftMouseButton))
+		{
+			bIsDrawingSelectionBox = false;
+		}
+		else if (FVector2D::DistSquared(SelectionStart, SelectionEnd) > MinSelectionSizeSq)
 		{
 			DrawSelectionBox(SelectionStart, SelectionEnd);
 		}
@@ -39,21 +47,6 @@ void ARTSHUD::DrawHUD()
 	{
 		PerformSelection();
         bIsPerformingSelection = false; // CRITICAL: Reset the flag to stop continuous selection
-	}
-
-	// --- Input Polling (One-Step Solution) ---
-	if (APlayerController* PC = GetOwningPlayerController())
-	{
-		if (PC->WasInputKeyJustPressed(EKeys::Tab))
-		{
-			if (const ULocalPlayer* LP = PC->GetLocalPlayer())
-			{
-				if (URTSSelectionSubsystem* Subsystem = LP->GetSubsystem<URTSSelectionSubsystem>())
-				{
-					Subsystem->CycleGroup();
-				}
-			}
-		}
 	}
 }
 
@@ -83,36 +76,40 @@ void ARTSHUD::DrawSelectionBox_Implementation(const FVector2D& StartPoint, const
 {
 	if (Canvas)
 	{
-		// Calculate Top-Left and Size
 		float MinX = FMath::Min(SelectionStart.X, SelectionEnd.X);
 		float MinY = FMath::Min(SelectionStart.Y, SelectionEnd.Y);
-		float Width = FMath::Abs(SelectionEnd.X - SelectionStart.X);
-		float Height = FMath::Abs(SelectionEnd.Y - SelectionStart.Y);
+		float MaxX = FMath::Max(SelectionStart.X, SelectionEnd.X);
+		float MaxY = FMath::Max(SelectionStart.Y, SelectionEnd.Y);
+		float Width = MaxX - MinX;
+		float Height = MaxY - MinY;
 
-		// 1. Draw Fill (Semi-transparent)
 		if (Width > 0 && Height > 0)
 		{
-			// Note: K2_DrawRect uses current Canvas position? No, it usually takes screen pos?
-			// Actually K2_DrawRect is tricky in UCanvas. 
-			// Standard way: Canvas->K2_DrawTexture(WhiteTexture, ScreenPos, ScreenSize, ... Tint).
-			// If we don't have a WhiteTexture, Update: UCanvas::K2_DrawMaterial matches best?
-			// Let's use `Canvas->K2_DrawPolygon`? No.
-			
-			// Ah, `DrawRect` (C++ API): `Canvas->DrawTile(WhiteTexture, X, Y, W, H, ...)`
-			// Wait, let's look at `Canvas->K2_DrawRect`. It exists in `UCanvas`.
-			// `void UCanvas::K2_DrawRect(FLinearColor RenderTextureColor, FVector2D ScreenPosition, FVector2D ScreenSize)`
-			
 			DrawRect(SelectionBoxFillColor, MinX, MinY, Width, Height);
 		}
 
-		// 2. Draw Borders
-		const auto TopRight = FVector2D(SelectionEnd.X, SelectionStart.Y);
-		const auto BottomLeft = FVector2D(SelectionStart.X, SelectionEnd.Y);
+		const FVector2D TopLeft(MinX, MinY);
+		const FVector2D TopRight(MaxX, MinY);
+		const FVector2D BottomRight(MaxX, MaxY);
+		const FVector2D BottomLeft(MinX, MaxY);
 
-		Canvas->K2_DrawLine(SelectionStart, TopRight, SelectionBoxThickness, SelectionBoxColor);
-		Canvas->K2_DrawLine(TopRight, SelectionEnd, SelectionBoxThickness, SelectionBoxColor);
-		Canvas->K2_DrawLine(SelectionEnd, BottomLeft, SelectionBoxThickness, SelectionBoxColor);
-		Canvas->K2_DrawLine(BottomLeft, SelectionStart, SelectionBoxThickness, SelectionBoxColor);
+		Canvas->K2_DrawLine(TopLeft, TopRight, SelectionBoxThickness, SelectionBoxColor);
+		Canvas->K2_DrawLine(TopRight, BottomRight, SelectionBoxThickness, SelectionBoxColor);
+		Canvas->K2_DrawLine(BottomRight, BottomLeft, SelectionBoxThickness, SelectionBoxColor);
+		Canvas->K2_DrawLine(BottomLeft, TopLeft, SelectionBoxThickness, SelectionBoxColor);
+
+		const float CornerLength = FMath::Clamp(FMath::Min(Width, Height) * 0.18f, 10.0f, 32.0f);
+		const float CornerThickness = SelectionBoxThickness + 1.0f;
+		const FLinearColor CornerColor(0.55f, 0.95f, 1.0f, 1.0f);
+
+		Canvas->K2_DrawLine(TopLeft, TopLeft + FVector2D(CornerLength, 0.0f), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(TopLeft, TopLeft + FVector2D(0.0f, CornerLength), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(TopRight, TopRight + FVector2D(-CornerLength, 0.0f), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(TopRight, TopRight + FVector2D(0.0f, CornerLength), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(BottomRight, BottomRight + FVector2D(-CornerLength, 0.0f), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(BottomRight, BottomRight + FVector2D(0.0f, -CornerLength), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(BottomLeft, BottomLeft + FVector2D(CornerLength, 0.0f), CornerThickness, CornerColor);
+		Canvas->K2_DrawLine(BottomLeft, BottomLeft + FVector2D(0.0f, -CornerLength), CornerThickness, CornerColor);
 	}
 }
 
@@ -161,12 +158,6 @@ void ARTSHUD::PerformSelection_Implementation()
 
     // B. Entity Path (Soldiers - Mass Battle Standard)
     PerformMassSelection(FinalMassSelection);
-
-    // 3. APPLY
-    if (SelectionSubsystem)
-    {
-        SelectionSubsystem->SetSelectedUnits(FinalActorSelection, FinalMassSelection, Modifier);
-    }
 
 	// 5. Toggle Logic (Shift + Single Click = Deselect)
 	// ONLY apply toggle if this was a Click (not a Box Drag).
@@ -239,28 +230,60 @@ void ARTSHUD::PerformSelection_Implementation()
 					FinalMassSelection.Reset();
 				}
 			}
-			// 2. Mass Entity Group Selection (Future TODO if specific Mass types needed)
+			// 2. Mass Entity Group Selection
 			else if (FinalMassSelection.Num() > 0)
 			{
-				// For Mass, we might need to check Archetype or Entity Config traits.
-				// For now, if we Ctrl+Click a Mass unit, we might select ALL Mass units on screen?
-				// Simplistic implementation: Select ALL valid Mass implementation if we clicked one.
-				
-				// Re-run PerformMassSelection with Full Screen?
-				// Note: Mass selection is expensive. Let's stick to Actor logic first as requested.
+				const int32 MatchSubType = GetMassEntitySubtypeIndex(FinalMassSelection[0]);
+				if (MatchSubType != INDEX_NONE)
+				{
+					int32 ViewportX = 0;
+					int32 ViewportY = 0;
+					PC->GetViewportSize(ViewportX, ViewportY);
+
+					const FVector2D SavedStart = SelectionStart;
+					const FVector2D SavedEnd = SelectionEnd;
+					SelectionStart = FVector2D(0.0f, 0.0f);
+					SelectionEnd = FVector2D(ViewportX, ViewportY);
+
+					TArray<FEntityHandle> AllScreenMass;
+					PerformMassSelection(AllScreenMass);
+
+					SelectionStart = SavedStart;
+					SelectionEnd = SavedEnd;
+
+					FinalMassSelection.Reset();
+					for (const FEntityHandle& Handle : AllScreenMass)
+					{
+						if (GetMassEntitySubtypeIndex(Handle) == MatchSubType)
+						{
+							FinalMassSelection.AddUnique(Handle);
+						}
+					}
+
+					Modifier = ERTSSelectionModifier::Replace;
+					FinalActorSelection.Reset();
+				}
 			}
 		}
 	}
 
-	// 6. Update Visuals & Subsystem
+	// 6. Update Subsystem once, after modifiers have had a chance to rewrite the selection.
+	if (SelectionSubsystem)
+	{
+		SelectionSubsystem->SetSelectedUnits(FinalActorSelection, FinalMassSelection, Modifier);
+	}
 	
 	// Visual Highlighting (Actors)
 	if (SelectorComponent)
 	{
-		if (FinalActorSelection.Num() > 0)
+		const TArray<AActor*>& VisualActors = SelectionSubsystem
+			? SelectionSubsystem->GetSelectedActors()
+			: FinalActorSelection;
+
+		if (VisualActors.Num() > 0)
 		{
-			UE_LOG(LogTemp, Log, TEXT("RTSHUD: Found %d Selectable Actors."), FinalActorSelection.Num());
-			SelectorComponent->HandleSelectedActors(FinalActorSelection);
+			UE_LOG(LogTemp, Log, TEXT("RTSHUD: Found %d Selectable Actors."), VisualActors.Num());
+			SelectorComponent->HandleSelectedActors(VisualActors);
 		}
 		else
 		{
@@ -273,10 +296,6 @@ void ARTSHUD::PerformSelection_Implementation()
 			}
 		}
 	}
-	
-	// Update Data Store - REMOVED DUPLICATE CALL
-	// SetSelectedUnits was already called above after initial search.
-	// Logic now relies on that single entry point.
 
 	bIsPerformingSelection = false;
 }
@@ -364,4 +383,33 @@ void ARTSHUD::PerformMassSelection(TArray<FEntityHandle>& OutEntities)
 			}
 		}
 	}
+}
+
+int32 ARTSHUD::GetMassEntitySubtypeIndex(const FEntityHandle& Handle) const
+{
+	if (Handle.Index == 0)
+	{
+		return INDEX_NONE;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return INDEX_NONE;
+	}
+
+	if (UMassEntitySubsystem* MassSys = World->GetSubsystem<UMassEntitySubsystem>())
+	{
+		FMassEntityManager& EntityManager = MassSys->GetMutableEntityManager();
+		const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
+		if (EntityManager.IsEntityActive(NativeHandle))
+		{
+			if (const FSubType* SubType = EntityManager.GetFragmentDataPtr<FSubType>(NativeHandle))
+			{
+				return SubType->Index;
+			}
+		}
+	}
+
+	return INDEX_NONE;
 }

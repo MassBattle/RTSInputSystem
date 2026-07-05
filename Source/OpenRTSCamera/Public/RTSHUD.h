@@ -48,6 +48,7 @@ protected:
 
 private:
 	void PerformMassSelection(TArray<struct FEntityHandle>& OutEntities);
+	int32 GetMassEntitySubtypeIndex(const struct FEntityHandle& Handle) const;
 
 	bool bIsDrawingSelectionBox;
 	bool bIsPerformingSelection;

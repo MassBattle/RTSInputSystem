@@ -23,9 +23,11 @@ public:
 	 * Updates the widget with data.
 	 * @param bShowIcon  If true, forces icon visibility (if valid). If false, hides icon.
 	 * @param bShowBars  If true, shows status bars.
+	 * @param bShowCount If true, shows the embedded count label when Data.Count > 1.
+	 * @param DesiredIconSize If greater than zero, forces a square desired icon size in pixels.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "RTS Selection")
-	void InitData(const FRTSUnitData& Data, bool bShowIcon = true, bool bShowBars = true);
+	void InitData(const FRTSUnitData& Data, bool bShowIcon = true, bool bShowBars = true, bool bShowCount = true, int32 DesiredIconSize = 0);
 
 	/**
 	 * Sets the visual active state (e.g. for Tab toggling).
@@ -44,6 +46,18 @@ protected:
 	// UI Bindings
 	UPROPERTY(meta = (BindWidgetOptional))
 	class UImage* UnitIcon;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UImage* ActiveFrame;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UWidget* UnitSlotFrame;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UTextBlock* UnitNameText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UTextBlock* CountText;
 
 	// -- Status Bars (Optional) --
 

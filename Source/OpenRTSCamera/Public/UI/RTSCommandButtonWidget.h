@@ -56,6 +56,9 @@ protected:
     UPROPERTY(meta = (BindWidget))
     TObjectPtr<class UTextBlock> HotkeyText;
 
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<class UTextBlock> DisplayNameText;
+
     // Auto-Cast Border (Image or Border)
     UPROPERTY(meta = (BindWidgetOptional))
     TObjectPtr<UImage> AutoCastBorder;

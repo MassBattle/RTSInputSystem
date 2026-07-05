@@ -1,11 +1,28 @@
 #include "UI/RTSUnitIconWidget.h"
 #include "RTSSelectionSubsystem.h"
 #include "Components/Image.h"
+#include "Components/OverlaySlot.h"
 #include "Components/ProgressBar.h"
+#include "Components/TextBlock.h"
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
+
+namespace
+{
+	FString GetUnitIconGroupKey(const FRTSUnitData& Data)
+	{
+		return Data.GroupKey.IsEmpty() ? Data.Name : Data.GroupKey;
+	}
+}
 
 void URTSUnitIconWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	if (UnitSlotFrame)
+	{
+		UnitSlotFrame->SetVisibility(ESlateVisibility::Hidden);
+	}
 
 	if (!UnitIcon)
 	{
@@ -17,11 +34,23 @@ void URTSUnitIconWidget::NativeConstruct()
 	}
 }
 
-void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool bShowBars)
+void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool bShowBars, bool bShowCount, int32 DesiredIconSize)
 {
 	// Set Icon
 	if (UnitIcon)
 	{
+		if (UnitSlotFrame)
+		{
+			UnitSlotFrame->SetVisibility(ESlateVisibility::Hidden);
+		}
+
+		if (UOverlaySlot* IconSlot = Cast<UOverlaySlot>(UnitIcon->Slot))
+		{
+			IconSlot->SetPadding(FMargin(0.0f));
+			IconSlot->SetHorizontalAlignment(HAlign_Fill);
+			IconSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
 		if (!bShowIcon)
 		{
 			UnitIcon->SetVisibility(ESlateVisibility::Collapsed);
@@ -38,10 +67,14 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 			}
 			else
 			{
-				// No specific icon data? Show default (White square as user expects, or BP default)
-				// We don't change the brush, so it keeps the Designer's default.
-				// Optionally set a debug color?
-				UE_LOG(LogTemp, Warning, TEXT("RTSUnitIconWidget: Data.Icon is null for %s. Showing default placeholder."), *Data.Name);
+				UnitIcon->SetColorAndOpacity(FLinearColor::Transparent);
+				UnitIcon->SetVisibility(ESlateVisibility::Hidden);
+				UE_LOG(LogTemp, Verbose, TEXT("RTSUnitIconWidget: Data.Icon is null for %s. Hiding icon placeholder."), *Data.Name);
+			}
+
+			if (DesiredIconSize > 0)
+			{
+				UnitIcon->SetDesiredSizeOverride(FVector2D(DesiredIconSize, DesiredIconSize));
 			}
 		}
 	}
@@ -60,11 +93,35 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 		if(ShieldBar) ShieldBar->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
+	if (UnitNameText)
+	{
+		UnitNameText->SetText(FText::FromString(Data.Name));
+		UnitNameText->SetVisibility(Data.Name.IsEmpty()
+			? ESlateVisibility::Collapsed
+			: ESlateVisibility::HitTestInvisible);
+	}
+
+	if (CountText)
+	{
+		if (bShowCount && Data.Count > 1)
+		{
+			CountText->SetText(FText::AsNumber(Data.Count));
+			CountText->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+		else
+		{
+			CountText->SetText(FText::GetEmpty());
+			CountText->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+
 	// Store for Interaction
 	StoredData = Data;
 
 	// Tooltip
 	FString Tooltip = Data.Name;
+	if (!Data.Role.IsEmpty()) Tooltip += FString::Printf(TEXT("\n%s"), *Data.Role);
+	if (Data.Count > 1) Tooltip += FString::Printf(TEXT("\nCount: %d"), Data.Count);
 	if (Data.MaxHealth > 0) Tooltip += FString::Printf(TEXT("\nHP: %.0f/%.0f"), Data.Health, Data.MaxHealth);
 	if (Data.MaxEnergy > 0) Tooltip += FString::Printf(TEXT("\nMP: %.0f/%.0f"), Data.Energy, Data.MaxEnergy);
 	if (Data.MaxShield > 0) Tooltip += FString::Printf(TEXT("\nSP: %.0f/%.0f"), Data.Shield, Data.MaxShield);
@@ -116,7 +173,7 @@ FReply URTSUnitIconWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, 
 					// Ctrl + Click = Select Type (Keep only this group)
 					if (InMouseEvent.IsControlDown())
 					{
-						Subsystem->SelectGroup(StoredData.Name);
+						Subsystem->SelectGroup(GetUnitIconGroupKey(StoredData));
 						return FReply::Handled();
 					}
 
@@ -136,7 +193,7 @@ FReply URTSUnitIconWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, 
 					
 					if (StoredData.Count > 1)
 					{
-						Subsystem->SelectGroup(StoredData.Name);
+						Subsystem->SelectGroup(GetUnitIconGroupKey(StoredData));
 					}
 					else
 					{

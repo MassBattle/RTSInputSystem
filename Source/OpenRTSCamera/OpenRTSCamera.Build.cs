@@ -29,7 +29,9 @@ public class OpenRTSCamera : ModuleRules
 				"GameplayTags",
 				"InputCore",
 				"MassAPI",
-				"MassEntity"
+				"MassEntity",
+				"SlateCore",
+				"UMG"
 			}
 		);
 
@@ -38,8 +40,6 @@ public class OpenRTSCamera : ModuleRules
 			{
 				"EnhancedInput",
 				"Slate",
-				"SlateCore",
-				"UMG",
 				"MassBattle"
 			}
 		);

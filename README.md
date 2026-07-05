@@ -1,8 +1,10 @@
-# RTSInputSystem
+# RTS Input System
 
-Mass branch: this repository is the integrated RTS input/control system for Mass Battle Frame. It combines the former `OpenRTSCamera` camera/selection plugin and the former `RTSCommandSystem` command-grid runtime into one repository.
+Mass branch: this repository is the integrated RTS Input System for Mass Battle Frame. It combines the former `OpenRTSCamera` camera/selection plugin and the former `RTSCommandSystem` command-grid runtime into one repository.
 
-Repository name: `RTSInputSystem`
+Repository/folder name: `RTSInputSystem`
+
+Product name: `RTS Input System`
 
 Current Unreal plugin module name: `OpenRTSCamera`
 
@@ -12,35 +14,26 @@ The module name is intentionally kept as `OpenRTSCamera` for now so existing ass
 
 Core plugin role:
 
-- `RTSInputSystem` owns camera movement, camera bounds, selection, command dispatch, and the 3x5 command panel runtime.
+- `RTS Input System` owns camera movement, camera bounds, selection, command dispatch, and the 3x5 command panel runtime.
 - `MassBattleFrame` remains the source of Mass agent data and movement/behavior execution.
-- `FogOfWar` owns shared map bounds export through `Config/FogOfWarMapBounds.ini`.
+- `Config/MapRegion/<MapName>/MapRegion.ini` is the shared minimap coordinate source.
 
-The camera does not depend on `FogOfWar` as a C++ module. Instead it reads the same map-bounds INI protocol:
+The camera does not depend on `FogOfWar` as a C++ module. Instead it reads the same map region INI protocol:
 
 ```ini
-[MapBounds.MapName]
+[MapRegion]
 OriginX=0
 OriginY=0
 SizeX=409600
 SizeY=409600
 MapOverflowUU=0
-
-[MapBounds.Default]
-OriginX=0
-OriginY=0
-SizeX=409600
-SizeY=409600
 ```
 
-At runtime `URTSCamera` resolves bounds in this order:
+At runtime `URTSCamera` resolves bounds from:
 
-1. `Config/FogOfWarMapBounds.ini`, section `MapBounds.<current map name>`.
-2. `Config/FogOfWarMapBounds.ini`, section `MapBounds.Default`.
-3. `ARTSCameraBoundsVolume`.
-4. Any actor tagged `OpenRTSCamera#CameraBounds`.
+- `Config/MapRegion/<current map name>/MapRegion.ini`, section `MapRegion`.
 
-This keeps the camera indirectly synchronized with the minimap/FogOfWar bounds without linking to minimap actor classes. The INI is currently a project config file with per-map sections; it is not embedded inside each `.umap`.
+This keeps the camera synchronized with the minimap unit projection without carrying a separate RTS camera boundary actor.
 
 ## Command System Integration
 
@@ -70,7 +63,7 @@ Actor-backed selections can still provide custom command grids through `IRTSComm
 
 For the Mass branch, enable:
 
-- `OpenRTSCamera`
+- `RTS Input System` (`OpenRTSCamera` technical plugin id)
 - `MassBattle`
 - `MassGameplay`
 - `EnhancedInput`

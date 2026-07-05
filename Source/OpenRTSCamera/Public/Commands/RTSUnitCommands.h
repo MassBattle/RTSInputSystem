@@ -23,8 +23,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Move"), false);
 		TargetType = ERTSCommandTargetType::Location; // Require click on ground
 		DisplayName = FText::FromString(TEXT("移动"));
-		Description = FText::FromString(TEXT("移动到指定位置。<n/><n/><RichText.Yellow>快捷键: M 或 右键点击</>"));
+		Description = FText::FromString(TEXT("移动到指定位置。<n/><n/><RichText.Yellow>快捷键: Q 或 右键点击</>"));
 		PreferredIndex = 0; // Row 1, Col 1
+		Hotkey = EKeys::Q;
 	}
 };
 
@@ -41,8 +42,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
 		TargetType = ERTSCommandTargetType::LocationOrTarget; // Can click ground or enemy
 		DisplayName = FText::FromString(TEXT("攻击"));
-		Description = FText::FromString(TEXT("向目标位置移动并攻击沿途敌人。<n/><n/><RichText.Yellow>快捷键: A</>"));
+		Description = FText::FromString(TEXT("向目标位置移动并攻击沿途敌人。<n/><n/><RichText.Yellow>快捷键: W</>"));
 		PreferredIndex = 1; // Row 1, Col 2
+		Hotkey = EKeys::W;
 	}
 };
 
@@ -59,8 +61,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Stop"), false);
 		TargetType = ERTSCommandTargetType::Instant;
 		DisplayName = FText::FromString(TEXT("停止"));
-		Description = FText::FromString(TEXT("立即停止当前所有行动。<n/><n/><RichText.Yellow>快捷键: S</>"));
+		Description = FText::FromString(TEXT("立即停止当前所有行动。<n/><n/><RichText.Yellow>快捷键: E</>"));
 		PreferredIndex = 2; // Row 1, Col 3
+		Hotkey = EKeys::E;
 	}
 };
 
@@ -77,8 +80,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Hold"), false);
 		TargetType = ERTSCommandTargetType::Instant;
 		DisplayName = FText::FromString(TEXT("驻守"));
-		Description = FText::FromString(TEXT("坚守阵地，不追击敌人。<n/><n/><RichText.Yellow>快捷键: H</>"));
+		Description = FText::FromString(TEXT("坚守阵地，不追击敌人。<n/><n/><RichText.Yellow>快捷键: R</>"));
 		PreferredIndex = 3; // Row 1, Col 4
+		Hotkey = EKeys::R;
 	}
 };
 
@@ -95,8 +99,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Patrol"), false);
 		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("巡逻"));
-		Description = FText::FromString(TEXT("在当前位置和目标位置之间巡逻。<n/><n/><RichText.Yellow>快捷键: P</>"));
+		Description = FText::FromString(TEXT("在当前位置和目标位置之间巡逻。<n/><n/><RichText.Yellow>快捷键: T</>"));
 		PreferredIndex = 4; // Row 1, Col 5
+		Hotkey = EKeys::T;
 	}
 };
 

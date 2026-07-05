@@ -24,6 +24,7 @@ public:
 	URTSCmd_BuildUniversity()
 	{
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Build.University"), false);
+		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("建造西南联大")); // Flavor: Southwest Associated University
 		Description = FText::FromString(TEXT("发展科技，提升科研效率。<n/><n/><RichText.Yellow>定位： 科技。</>"));
 		PreferredIndex = 6; // Row 2, Col 2 (5+1)
@@ -46,6 +47,7 @@ public:
 	URTSCmd_BuildBarracks()
 	{
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Build.Barracks"), false);
+		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("建造训练营"));
 		Description = FText::FromString(TEXT("招募步兵与军官。<n/><n/><RichText.Yellow>定位： 军事。</>"));
 		PreferredIndex = 7; // Row 2, Col 3
@@ -66,6 +68,7 @@ public:
 	URTSCmd_BuildVehicleDepot()
 	{
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Build.VehicleDepot"), false);
+		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("建造辎重营")); // Flavor: Supply/Vehicle Depot
 		Description = FText::FromString(TEXT("生产卡车与轻型装甲车。<n/><n/><RichText.Yellow>定位： 机械化。</>"));
 		PreferredIndex = 8; // Row 2, Col 4
@@ -87,6 +90,7 @@ public:
 	URTSCmd_BuildAirfield()
 	{
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Build.Airfield"), false);
+		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("建造简易机场"));
 		Description = FText::FromString(TEXT("呼叫空军支援。<n/><n/><RichText.Yellow>定位： 空军。</>"));
 		PreferredIndex = 9; // Row 2, Col 5

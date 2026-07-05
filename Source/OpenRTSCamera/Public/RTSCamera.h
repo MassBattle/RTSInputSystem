@@ -98,12 +98,15 @@ public:
 	void jumpTo(FVector position);
 
 	/**
-	 * @brief       获取当前用于相机移动约束的边界体积引用
-	 * 
-	 * @return      返回值类型:      AActor*
+	 * @brief       获取当前相机实际使用的移动边界。该数据来自关卡级 MapRegion ini，
+	 *              与小地图单位显示保持同一套坐标系。
+	 *
+	 * @param       OutOrigin                       数据类型:        FVector&
+	 * @param       OutExtents                      数据类型:        FVector&
+	 *
+	 * @return      返回值类型:      bool
 	 **/
-	UFUNCTION(BlueprintPure, Category = "RTSCamera")
-	AActor* getMovementBoundaryVolume() const { return movementBoundaryVolume; }
+	bool getResolvedMovementBounds(FVector& OutOrigin, FVector& OutExtents) const;
 
 	/// 相机缩放的最小目标距离（最接近地面）
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Zoom Settings", meta = (DisplayName = "最小缩放高度", ToolTip = "相机距离地面的最近距离。"))
@@ -327,10 +330,6 @@ protected:
 	UPROPERTY()
 	APlayerController* realTimeStrategyPlayerController;
 
-	/// 用于限制相机在地图中活动范围的体积
-	UPROPERTY()
-	AActor* movementBoundaryVolume;
-
 	bool bHasResolvedBoundaryData = false;
 	FVector ResolvedBoundaryOrigin = FVector::ZeroVector;
 	FVector ResolvedBoundaryExtents = FVector::ZeroVector;
@@ -344,7 +343,7 @@ private:
 	void resolveComponentDependencyPointers();
 	void setupInitialSpringArmState();
 
-	void locateMapBoundaryVolumeByTag();
+	bool initializeMovementBoundsFromMapRegion();
 	void configureInputModeForEdgeScrolling();
 	void validateEnhancedInputAvailability();
 	void registerInputMappingContext();

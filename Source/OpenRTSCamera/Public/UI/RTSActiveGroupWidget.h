@@ -9,6 +9,7 @@
 #include "RTSActiveGroupWidget.generated.h"
 
 class URTSUnitIconWidget;
+class UImage;
 
 /**
  * A standalone widget that displays the currently active sub-group (Leader/Avatar).
@@ -21,6 +22,7 @@ class OPENRTSCAMERA_API URTSActiveGroupWidget : public UUserWidget
 
 protected:
 	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 
 	UFUNCTION()
 	virtual void OnSelectionUpdated(const FRTSSelectionView& View);
@@ -30,6 +32,10 @@ protected:
 	// Or users can just inherit this class in their WBP_Avatar
 	UPROPERTY(meta = (BindWidgetOptional))
 	URTSUnitIconWidget* GroupIcon;
+
+	// Optional direct avatar image used by RTSAvatar.
+	UPROPERTY(meta = (BindWidgetOptional))
+	UImage* AvatarImage;
 	
 	// Optional: A text block for the name? (Or let GroupIcon handle it?)
 	// Let's keep it simple: It mostly wraps functionality.

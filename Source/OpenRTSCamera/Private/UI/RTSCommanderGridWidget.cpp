@@ -1,13 +1,224 @@
 #include "UI/RTSCommanderGridWidget.h"
 #include "Components/UniformGridSlot.h"
+#include "Components/InputComponent.h"
+#include "Engine/Texture2D.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "RTSSelectionSubsystem.h" 
+#include "RTSInputPanelSettings.h"
 #include "Interfaces/RTSCommandInterface.h" 
 #include "RTSSelector.h"
 #include "RTSCommandSubsystem.h"
 #include "UI/RTSTooltipWidget.h"
+#include "HAL/FileManager.h"
+#include "ImageUtils.h"
+#include "Misc/Paths.h"
 
+namespace
+{
+	constexpr int32 CommandGridColumns = 5;
+	constexpr int32 CommandGridRows = 3;
+	constexpr int32 CommandGridSlotCount = CommandGridColumns * CommandGridRows;
+
+	ULocalPlayer* ResolveCommanderGridLocalPlayer(const UUserWidget* Widget)
+	{
+		if (!Widget)
+		{
+			return nullptr;
+		}
+
+		if (ULocalPlayer* LP = Widget->GetOwningLocalPlayer())
+		{
+			return LP;
+		}
+
+		if (APlayerController* PC = Widget->GetOwningPlayer())
+		{
+			return PC->GetLocalPlayer();
+		}
+
+		if (UWorld* World = Widget->GetWorld())
+		{
+			return World->GetFirstLocalPlayerFromController();
+		}
+
+		return nullptr;
+	}
+
+	FKey GetDefaultCommandPanelKey(int32 SlotIndex)
+	{
+		static const FKey DefaultKeys[] =
+		{
+			EKeys::Q, EKeys::W, EKeys::E, EKeys::R, EKeys::T,
+			EKeys::A, EKeys::S, EKeys::D, EKeys::F, EKeys::G,
+			EKeys::Z, EKeys::X, EKeys::C, EKeys::V, EKeys::B
+		};
+
+		return SlotIndex >= 0 && SlotIndex < UE_ARRAY_COUNT(DefaultKeys)
+			? DefaultKeys[SlotIndex]
+			: FKey();
+	}
+
+	FKey MakeCommandPanelKeyFromName(const FName KeyName)
+	{
+		static const TMap<FName, FKey> NamedKeys =
+		{
+			{ FName(TEXT("Q")), EKeys::Q },
+			{ FName(TEXT("W")), EKeys::W },
+			{ FName(TEXT("E")), EKeys::E },
+			{ FName(TEXT("R")), EKeys::R },
+			{ FName(TEXT("T")), EKeys::T },
+			{ FName(TEXT("A")), EKeys::A },
+			{ FName(TEXT("S")), EKeys::S },
+			{ FName(TEXT("D")), EKeys::D },
+			{ FName(TEXT("F")), EKeys::F },
+			{ FName(TEXT("G")), EKeys::G },
+			{ FName(TEXT("Z")), EKeys::Z },
+			{ FName(TEXT("X")), EKeys::X },
+			{ FName(TEXT("C")), EKeys::C },
+			{ FName(TEXT("V")), EKeys::V },
+			{ FName(TEXT("B")), EKeys::B },
+		};
+
+		if (const FKey* ExplicitKey = NamedKeys.Find(KeyName))
+		{
+			return *ExplicitKey;
+		}
+
+		const FKey ConfiguredKey(KeyName);
+		return ConfiguredKey.IsValid() ? ConfiguredKey : FKey();
+	}
+
+	FKey GetCommandPanelKey(int32 SlotIndex)
+	{
+		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+		if (Settings && Settings->CommandPanelSlots.IsValidIndex(SlotIndex))
+		{
+			const FName KeyName = Settings->CommandPanelSlots[SlotIndex].Hotkey;
+			if (!KeyName.IsNone())
+			{
+				const FKey ConfiguredKey = MakeCommandPanelKeyFromName(KeyName);
+				if (ConfiguredKey.IsValid())
+				{
+					return ConfiguredKey;
+				}
+			}
+		}
+
+		return GetDefaultCommandPanelKey(SlotIndex);
+	}
+
+	bool AreCommandPanelHotkeysEnabled()
+	{
+		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+		return !Settings || Settings->bEnableCommandPanelHotkeys;
+	}
+
+	const TCHAR* GetDefaultCommandIconFileName(const FGameplayTag& CommandTag)
+	{
+		const FName TagName = CommandTag.GetTagName();
+		if (TagName == FName(TEXT("RTS.Command.Move")))
+		{
+			return TEXT("RTS_Command_Move.png");
+		}
+		if (TagName == FName(TEXT("RTS.Command.Attack")))
+		{
+			return TEXT("RTS_Command_Attack.png");
+		}
+		if (TagName == FName(TEXT("RTS.Command.Stop")))
+		{
+			return TEXT("RTS_Command_Stop.png");
+		}
+		if (TagName == FName(TEXT("RTS.Command.Hold")))
+		{
+			return TEXT("RTS_Command_Hold.png");
+		}
+		if (TagName == FName(TEXT("RTS.Command.Patrol")))
+		{
+			return TEXT("RTS_Command_Patrol.png");
+		}
+
+		const FString TagString = TagName.ToString();
+		if (TagString.StartsWith(TEXT("RTS.Command.Build.")))
+		{
+			return TEXT("RTS_Command_Hold.png");
+		}
+		if (TagString.StartsWith(TEXT("RTS.Command.Train.")))
+		{
+			return TEXT("RTS_Command_Move.png");
+		}
+
+		return TEXT("RTS_Command_Stop.png");
+	}
+
+	UTexture2D* LoadDefaultCommandIcon(const FGameplayTag& CommandTag)
+	{
+		static TMap<FName, UTexture2D*> IconCache;
+
+		const FName CacheKey(*FString(GetDefaultCommandIconFileName(CommandTag)));
+		if (UTexture2D** CachedTexture = IconCache.Find(CacheKey))
+		{
+			return *CachedTexture;
+		}
+
+		const FString IconPath = FPaths::Combine(
+			FPaths::ProjectPluginsDir(),
+			TEXT("RTSInputSystem"),
+			TEXT("Content"),
+			TEXT("CommandIcons"),
+			TEXT("Source"),
+			GetDefaultCommandIconFileName(CommandTag)
+		);
+
+		UTexture2D* Texture = nullptr;
+		if (IFileManager::Get().FileExists(*IconPath))
+		{
+			Texture = FImageUtils::ImportFileAsTexture2D(IconPath);
+			if (Texture)
+			{
+				Texture->AddToRoot();
+				Texture->SRGB = true;
+			}
+		}
+
+		IconCache.Add(CacheKey, Texture);
+		return Texture;
+	}
+
+	FText MakeCommandLabelFromTag(const FGameplayTag& CommandTag)
+	{
+		FString Label = CommandTag.IsValid()
+			? CommandTag.GetTagName().ToString()
+			: TEXT("Command");
+		Label.RemoveFromStart(TEXT("RTS.Command."));
+		Label.ReplaceInline(TEXT("."), TEXT(" "));
+		return FText::FromString(Label.IsEmpty() ? TEXT("Command") : Label);
+	}
+
+	void EnsureCommandButtonPresentation(URTSCommandButton* Button)
+	{
+		if (!Button)
+		{
+			return;
+		}
+
+		if (!Button->Icon)
+		{
+			Button->Icon = LoadDefaultCommandIcon(Button->CommandTag);
+		}
+
+		if (Button->DisplayName.IsEmpty())
+		{
+			Button->DisplayName = MakeCommandLabelFromTag(Button->CommandTag);
+		}
+
+		if (Button->Description.IsEmpty())
+		{
+			Button->Description = FText::FromString(FString::Printf(TEXT("Execute %s."), *Button->DisplayName.ToString()));
+		}
+	}
+
+}
 
 void URTSCommanderGridWidget::NativePreConstruct()
 {
@@ -27,34 +238,60 @@ void URTSCommanderGridWidget::NativeConstruct()
 	InitGridSlots();
 	
     // 绑定全局通知（模块间解耦的通信枢纽）
-    if (UWorld* World = GetWorld())
-    {
-        if (ULocalPlayer* LP = World->GetFirstLocalPlayerFromController())
-        {
-            if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
-            {
-                Selection->OnCommandRefreshRequested.AddUniqueDynamic(this, &URTSCommanderGridWidget::OnActorGridChanged);
-                Selection->OnCommandNavigationRequested.AddUniqueDynamic(this, &URTSCommanderGridWidget::OnCommandNavigationRequested);
-                // 绑定选择变化通知，驱动 ActiveActorPtr 更新和 Grid 刷新
-                Selection->OnSelectionChanged.AddUniqueDynamic(this, &URTSCommanderGridWidget::OnSelectionUpdated);
-            }
+	if (ULocalPlayer* LP = ResolveCommanderGridLocalPlayer(this))
+	{
+		if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+		{
+			Selection->OnCommandRefreshRequested.AddUniqueDynamic(this, &URTSCommanderGridWidget::OnActorGridChanged);
+			Selection->OnCommandNavigationRequested.AddUniqueDynamic(this, &URTSCommanderGridWidget::OnCommandNavigationRequested);
+		}
 
-    // 监听低层级指令系统的导航请求 (二进制导航)
-    if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
-    {
-        SignalHub->OnNavigationRequested.AddLambda([this](URTSCommandGridAsset* NewGrid, AActor* Context)
-        {
-            this->UpdateGrid(NewGrid);
-        });
-    }
-        }
-    }
+		// 监听低层级指令系统的导航请求 (二进制导航)
+		if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+		{
+			CommandNavigationHandle = SignalHub->OnNavigationRequested.AddLambda([this](URTSCommandGridAsset* NewGrid, AActor* Context)
+			{
+				this->UpdateGrid(NewGrid);
+			});
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RTSCommanderGridWidget: LocalPlayer not found; command navigation binding skipped."));
+	}
 	
 	// If Debug Asset is set, load it immediately for testing
 	if (DebugGridAsset)
 	{
 		// RefreshGrid(DebugGridAsset->GetAllButtons()); // Need better logic here for sparse array
 	}
+
+	RegisterCommandPanelHotkeys();
+}
+
+void URTSCommanderGridWidget::NativeDestruct()
+{
+	UnregisterCommandPanelHotkeys();
+
+	if (ULocalPlayer* LP = ResolveCommanderGridLocalPlayer(this))
+	{
+		if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+		{
+			Selection->OnCommandRefreshRequested.RemoveDynamic(this, &URTSCommanderGridWidget::OnActorGridChanged);
+			Selection->OnCommandNavigationRequested.RemoveDynamic(this, &URTSCommanderGridWidget::OnCommandNavigationRequested);
+		}
+
+		if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+		{
+			if (CommandNavigationHandle.IsValid())
+			{
+				SignalHub->OnNavigationRequested.Remove(CommandNavigationHandle);
+				CommandNavigationHandle.Reset();
+			}
+		}
+	}
+
+	Super::NativeDestruct();
 }
 
 void URTSCommanderGridWidget::InitGridSlots()
@@ -64,7 +301,7 @@ void URTSCommanderGridWidget::InitGridSlots()
          UE_LOG(LogTemp, Warning, TEXT("RTSCommanderGridWidget: CommandGridPanel is NULL!"));
          return;
     }
-    
+
     if (!ButtonParams)
     {
          UE_LOG(LogTemp, Warning, TEXT("RTSCommanderGridWidget: ButtonParams is NULL! Please assign a WBP_CommandButton class in the Widget Blueprint Details."));
@@ -74,14 +311,14 @@ void URTSCommanderGridWidget::InitGridSlots()
 	CommandGridPanel->ClearChildren();
 	GridButtons.Empty();
 
-    CommandGridPanel->SetSlotPadding(SlotPadding);
-    CommandGridPanel->SetMinDesiredSlotWidth(ButtonSize.X);
-    CommandGridPanel->SetMinDesiredSlotHeight(ButtonSize.Y);
+	CommandGridPanel->SetSlotPadding(SlotPadding);
+	CommandGridPanel->SetMinDesiredSlotWidth(FMath::Max(1.0f, ButtonSize.X));
+	CommandGridPanel->SetMinDesiredSlotHeight(FMath::Max(1.0f, ButtonSize.Y));
 
-	// Create 15 slots (3 rows x 5 columns)
-	for (int32 Row = 0; Row < 3; ++Row)
+	// StarCraft-style command card: 15 slots (3 rows x 5 columns).
+	for (int32 Row = 0; Row < CommandGridRows; ++Row)
 	{
-		for (int32 Col = 0; Col < 5; ++Col)
+		for (int32 Col = 0; Col < CommandGridColumns; ++Col)
 		{
 			URTSCommandButtonWidget* Btn = CreateWidget<URTSCommandButtonWidget>(this, ButtonParams);
 			if (Btn)
@@ -97,7 +334,8 @@ void URTSCommanderGridWidget::InitGridSlots()
                 {
 				    Btn->OnCommandClicked.AddDynamic(this, &URTSCommanderGridWidget::OnGridButtonClicked);
                 }
-				GridButtons.Add(Btn); // Index = Row*5 + Col
+				Btn->Init(nullptr, nullptr, FKey());
+				GridButtons.Add(Btn); // Index = Row * CommandGridColumns + Col
 			}
 		}
 	}
@@ -109,25 +347,28 @@ void URTSCommanderGridWidget::OnSelectionUpdated(const FRTSSelectionView& View)
     LastSelectionView = View;
 
 	URTSCommandGridAsset* BaseGrid = nullptr;
-    
-    // Try the active Actor first; pure Mass selections are handled by the selection subsystem default grid broadcast.
-    if (!BaseGrid)
-    {
-        if (ULocalPlayer* LP = GetOwningLocalPlayer())
-        {
-            if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
-            {
-                AActor* ActiveActor = Selection->GetActiveActor();
-                if (ActiveActor && ActiveActor->Implements<URTSCommandInterface>())
-                {
-                    BaseGrid = IRTSCommandInterface::Execute_GetCommandGrid(ActiveActor);
-                }
-            }
-        }
-    }
 
-    // 更新网格（UpdateGrid 内部会处理 BaseGrid 是否变化的逻辑）
-    UpdateGrid(BaseGrid);
+	if (ULocalPlayer* LP = ResolveCommanderGridLocalPlayer(this))
+	{
+		if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+		{
+			AActor* ActiveActor = Selection->GetActiveActor();
+			ActiveActorPtr = ActiveActor;
+			if (ActiveActor && ActiveActor->Implements<URTSCommandInterface>())
+			{
+				BaseGrid = IRTSCommandInterface::Execute_GetCommandGrid(ActiveActor);
+			}
+		}
+	}
+
+	if (BaseGrid)
+	{
+		UpdateGrid(BaseGrid);
+	}
+	else if (View.Items.Num() == 0)
+	{
+		UpdateGrid(nullptr);
+	}
 }
 
 void URTSCommanderGridWidget::UpdateGrid(URTSCommandGridAsset* NewGrid)
@@ -136,7 +377,7 @@ void URTSCommanderGridWidget::UpdateGrid(URTSCommandGridAsset* NewGrid)
     CurrentGridAsset = NewGrid;
     
     TArray<URTSCommandButton*> SparseList;
-    SparseList.Init(nullptr, 15);
+    SparseList.Init(nullptr, CommandGridSlotCount);
     if (NewGrid)
     {
         PopulateSparseButtons(NewGrid, SparseList);
@@ -158,21 +399,15 @@ void URTSCommanderGridWidget::RefreshVisuals()
 {
     if (!CurrentGridAsset.IsValid()) return;
 
-    const FKey GridKeys[] = {
-        EKeys::Q, EKeys::W, EKeys::E, EKeys::R, EKeys::T,
-        EKeys::A, EKeys::S, EKeys::D, EKeys::F, EKeys::G,
-        EKeys::Z, EKeys::X, EKeys::C, EKeys::V, EKeys::B
-    };
-
     TArray<URTSCommandButton*> SparseList;
     PopulateSparseButtons(CurrentGridAsset.Get(), SparseList);
     
-    for (int32 i = 0; i < 15; ++i)
+    for (int32 i = 0; i < CommandGridSlotCount; ++i)
     {
         if (GridButtons.IsValidIndex(i) && GridButtons[i])
         {
             // 增量刷新时必须保留布局决定的快捷键（Q/W/E），否则会被重置为 None
-            GridButtons[i]->Init(SparseList[i], ActiveActorPtr.Get(), GridKeys[i]);
+            GridButtons[i]->Init(SparseList[i], ActiveActorPtr.Get(), GetCommandPanelKey(i));
         }
     }
     UE_LOG(LogTemp, Verbose, TEXT("UI-Grid: Visuals Refreshed."));
@@ -181,7 +416,7 @@ void URTSCommanderGridWidget::RefreshVisuals()
 void URTSCommanderGridWidget::PopulateSparseButtons(URTSCommandGridAsset* Grid, TArray<URTSCommandButton*>& OutButtons)
 {
     if (!Grid) return;
-    OutButtons.Init(nullptr, 15);
+    OutButtons.Init(nullptr, CommandGridSlotCount);
 
     // 1. 获取所有按钮（支持虚函数重写，覆盖了单例面板和普通资产面板）
     TArray<URTSCommandButton*> AllButtons = Grid->GetAllButtons();
@@ -191,9 +426,10 @@ void URTSCommanderGridWidget::PopulateSparseButtons(URTSCommandGridAsset* Grid, 
     for (URTSCommandButton* Btn : AllButtons)
     {
         if (!Btn) continue;
+        EnsureCommandButtonPresentation(Btn);
 
         int32 Idx = Btn->PreferredIndex;
-        if (Idx >= 0 && Idx < 15 && OutButtons[Idx] == nullptr)
+        if (Idx >= 0 && Idx < CommandGridSlotCount && OutButtons[Idx] == nullptr)
         {
             OutButtons[Idx] = Btn;
         }
@@ -207,7 +443,7 @@ void URTSCommanderGridWidget::PopulateSparseButtons(URTSCommandGridAsset* Grid, 
     int32 StartSearch = 0; 
     for (URTSCommandButton* Btn : Untracked)
     {
-        for (int32 i = StartSearch; i < 15; ++i)
+        for (int32 i = StartSearch; i < CommandGridSlotCount; ++i)
         {
             if (OutButtons[i] == nullptr)
             {
@@ -220,33 +456,27 @@ void URTSCommanderGridWidget::PopulateSparseButtons(URTSCommandGridAsset* Grid, 
 
 void URTSCommanderGridWidget::RefreshGrid(const TArray<URTSCommandButton*>& Buttons)
 {
-	if (Buttons.Num() != 15) return;
+	if (Buttons.Num() != CommandGridSlotCount) return;
 
-    const FKey GridKeys[] = {
-        EKeys::Q, EKeys::W, EKeys::E, EKeys::R, EKeys::T,
-        EKeys::A, EKeys::S, EKeys::D, EKeys::F, EKeys::G,
-        EKeys::Z, EKeys::X, EKeys::C, EKeys::V, EKeys::B
-    };
-
-	for (int32 i = 0; i < 15; ++i)
+	for (int32 i = 0; i < CommandGridSlotCount; ++i)
 	{
 		if (GridButtons.IsValidIndex(i) && GridButtons[i])
 		{
-			GridButtons[i]->Init(Buttons[i], ActiveActorPtr.Get(), GridKeys[i]);
+			GridButtons[i]->Init(Buttons[i], ActiveActorPtr.Get(), GetCommandPanelKey(i));
 		}
 	}
 }
 
 void URTSCommanderGridWidget::OnActorGridChanged()
 {
-    // 该函数现在映射为 RefreshVisuals 以保持向后兼容
+    // 该函数现在转发到 RefreshVisuals
     RefreshVisuals();
 }
 
 void URTSCommanderGridWidget::OnCommandNavigationRequested(URTSCommandGridAsset* NewGrid)
 {
     // 直接从 Subsystem 拿当前激活 Actor，不走 ActiveActorPtr 中间状态
-    if (ULocalPlayer* LP = GetOwningLocalPlayer())
+    if (ULocalPlayer* LP = ResolveCommanderGridLocalPlayer(this))
     {
         if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
         {
@@ -365,6 +595,109 @@ void URTSCommanderGridWidget::NotifyButtonUnhovered(URTSCommandButtonWidget* Btn
     }
 }
 
+void URTSCommanderGridWidget::RegisterCommandPanelHotkeys()
+{
+	if (!AreCommandPanelHotkeysEnabled())
+	{
+		return;
+	}
+
+	APlayerController* PC = GetOwningPlayer();
+	if (!PC || CommandPanelInputComponent)
+	{
+		return;
+	}
+
+	UWorld* InputWorld = PC->GetWorld();
+	if (!InputWorld)
+	{
+		return;
+	}
+
+	CommandPanelInputComponent = NewObject<UInputComponent>(PC);
+	if (!CommandPanelInputComponent)
+	{
+		return;
+	}
+
+	CommandPanelInputComponent->Priority = 5;
+	CommandPanelInputComponent->bBlockInput = false;
+	CommandPanelInputComponent->RegisterComponentWithWorld(InputWorld);
+
+	for (int32 SlotIndex = 0; SlotIndex < CommandGridSlotCount; ++SlotIndex)
+	{
+		const FKey Hotkey = GetCommandPanelKey(SlotIndex);
+		if (!Hotkey.IsValid())
+		{
+			continue;
+		}
+
+		FInputKeyBinding Binding(FInputChord(Hotkey), IE_Pressed);
+		Binding.bConsumeInput = true;
+		Binding.KeyDelegate.GetDelegateForManualSet().BindLambda([this, SlotIndex]()
+		{
+			ExecuteCommandPanelSlot(SlotIndex);
+		});
+		CommandPanelInputComponent->KeyBindings.Add(MoveTemp(Binding));
+	}
+
+	FInputKeyBinding TabBinding(FInputChord(EKeys::Tab), IE_Pressed);
+	TabBinding.bConsumeInput = true;
+	TabBinding.KeyDelegate.GetDelegateForManualSet().BindLambda([this]()
+	{
+		if (ULocalPlayer* LP = GetOwningLocalPlayer())
+		{
+			if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+			{
+				Selection->CycleGroup();
+			}
+		}
+	});
+	CommandPanelInputComponent->KeyBindings.Add(MoveTemp(TabBinding));
+
+	PC->PushInputComponent(CommandPanelInputComponent);
+	CommandPanelInputOwner = PC;
+}
+
+void URTSCommanderGridWidget::UnregisterCommandPanelHotkeys()
+{
+	if (!CommandPanelInputComponent)
+	{
+		return;
+	}
+
+	if (CommandPanelInputOwner.IsValid())
+	{
+		CommandPanelInputOwner->PopInputComponent(CommandPanelInputComponent);
+	}
+
+	CommandPanelInputComponent->DestroyComponent();
+	CommandPanelInputComponent = nullptr;
+	CommandPanelInputOwner.Reset();
+}
+
+void URTSCommanderGridWidget::ExecuteCommandPanelSlot(int32 SlotIndex)
+{
+	if (!GridButtons.IsValidIndex(SlotIndex))
+	{
+		return;
+	}
+
+	URTSCommandButtonWidget* ButtonWidget = GridButtons[SlotIndex];
+	if (!ButtonWidget || ButtonWidget->GetVisibility() != ESlateVisibility::Visible)
+	{
+		return;
+	}
+
+	URTSCommandButton* ButtonData = ButtonWidget->GetData();
+	if (!ButtonData)
+	{
+		return;
+	}
+
+	OnGridButtonClicked(ButtonData->CommandTag);
+}
+
 void URTSCommanderGridWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
     Super::NativeTick(MyGeometry, InDeltaTime);
@@ -393,7 +726,7 @@ void URTSCommanderGridWidget::NativeTick(const FGeometry& MyGeometry, float InDe
             FVector2D MousePos;
             if (GetOwningPlayer() && GetOwningPlayer()->GetMousePosition(MousePos.X, MousePos.Y))
             {
-                FVector2D ViewportSize;
+                FVector2D ViewportSize = MyGeometry.GetLocalSize();
                 if (GEngine && GEngine->GameViewport)
                 {
                     GEngine->GameViewport->GetViewportSize(ViewportSize);

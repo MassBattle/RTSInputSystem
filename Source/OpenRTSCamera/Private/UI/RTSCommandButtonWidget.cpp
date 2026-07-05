@@ -15,7 +15,7 @@ void URTSCommandButtonWidget::NativeConstruct()
 
 	if (MainButton)
 	{
-		MainButton->OnClicked.AddDynamic(this, &URTSCommandButtonWidget::HandleClicked);
+		MainButton->OnClicked.AddUniqueDynamic(this, &URTSCommandButtonWidget::HandleClicked);
 	}
 }
 
@@ -36,6 +36,14 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
                 IconImage->SetBrushFromTexture(ButtonData->Icon);
             }
             IconImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+        }
+
+        if (DisplayNameText)
+        {
+            DisplayNameText->SetText(ButtonData->DisplayName);
+            DisplayNameText->SetVisibility(ButtonData->DisplayName.IsEmpty()
+                ? ESlateVisibility::Collapsed
+                : ESlateVisibility::HitTestInvisible);
         }
 
         // Set Hotkey Display
@@ -71,6 +79,7 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
             AutoCastBorder->SetVisibility(ESlateVisibility::Hidden);
         }
 
+        SetIsDisabled(false);
         SetVisibility(ESlateVisibility::Visible);
         
         // Remove Standard Tooltip to allow shared logic
@@ -171,6 +180,7 @@ if (ButtonData && ContextActor.IsValid() && ContextActor->Implements<URTSCommand
         
         // Protocol Change: Send normalized "CD_Phase"
         CooldownMaterial->SetScalarParameterValue(FName("CD_Phase"), Phase);
+        CooldownMaterial->SetScalarParameterValue(FName("CD_EndTime"), Phase);
     }
 
     bIsCooldownActive = bCurrentlyCooling;

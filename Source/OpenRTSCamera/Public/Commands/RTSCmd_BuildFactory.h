@@ -22,6 +22,7 @@ public:
 	{
 		// Setup Defaults
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Build.Factory"), false);
+		TargetType = ERTSCommandTargetType::Location;
 		
         // Note: Loading assets in constructor can be risky for cooked builds if not careful, 
         // but standard for CDO. 

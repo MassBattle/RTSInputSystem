@@ -3,10 +3,8 @@
 #include "UI/RTSCameraMinimapWidget.h"
 #include "RTSCamera.h"
 #include "OpenRTSCamera.h"
-#include "Camera/CameraComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
-#include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Rendering/DrawElements.h"
 
@@ -67,33 +65,17 @@ void URTSCameraMinimapWidget::findRTSCamera()
 		this->cachedRTSCamera->onMinimapFrustumUpdated.RemoveAll(this);
 		this->cachedRTSCamera->onMinimapFrustumUpdated.AddUObject(this, &URTSCameraMinimapWidget::handleMinimapFrustumUpdated);
 
-		AActor* cameraOwner = this->cachedRTSCamera->GetOwner();
-		if (cameraOwner)
-		{
-			if (!this->cachedCameraComponent) 
-			{
-				this->cachedCameraComponent = cameraOwner->FindComponentByClass<UCameraComponent>();
-			}
-			if (!this->cachedSpringArm) 
-			{
-				this->cachedSpringArm = cameraOwner->FindComponentByClass<USpringArmComponent>();
-			}
-		}
-
-		/// 初始同步地图边界数据
-		if (!this->bHasValidBounds)
-		{
-			if (AActor* boundsActor = this->cachedRTSCamera->getMovementBoundaryVolume())
-			{
-				FVector origin;
-				FVector extent;
-				boundsActor->GetActorBounds(false, origin, extent);
-				this->cachedBoundsOrigin = origin;
-				this->cachedBoundsExtent = extent;
-				this->bHasValidBounds = true;
-			}
-		}
 	}
+}
+
+bool URTSCameraMinimapWidget::getCurrentBounds(FVector& OutOrigin, FVector& OutExtent) const
+{
+	if (!this->cachedRTSCamera)
+	{
+		return false;
+	}
+
+	return this->cachedRTSCamera->getResolvedMovementBounds(OutOrigin, OutExtent);
 }
 
 void URTSCameraMinimapWidget::handleMinimapFrustumUpdated()
@@ -106,13 +88,19 @@ void URTSCameraMinimapWidget::handleMinimapFrustumUpdated()
 FVector2D URTSCameraMinimapWidget::ConvertWorldToWidgetLocal(const FVector2D& WorldPos, const FVector2D& WidgetSize) const
 {
 	/// 将世界坐标系下的点线性映射至小地图控件的局部 0-1 空间，并适配轴向偏移
-	if (this->cachedBoundsExtent.X < KINDA_SMALL_NUMBER || this->cachedBoundsExtent.Y < KINDA_SMALL_NUMBER) 
+	FVector boundsOrigin = FVector::ZeroVector;
+	FVector boundsExtent = FVector::ZeroVector;
+	if (!this->getCurrentBounds(boundsOrigin, boundsExtent) ||
+		boundsExtent.X < KINDA_SMALL_NUMBER ||
+		boundsExtent.Y < KINDA_SMALL_NUMBER)
 	{
 		return FVector2D::ZeroVector;
 	}
 
-	float normalizedX = (WorldPos.X - (this->cachedBoundsOrigin.X - this->cachedBoundsExtent.X)) / (2.0f * this->cachedBoundsExtent.X);
-	float normalizedY = (WorldPos.Y - (this->cachedBoundsOrigin.Y - this->cachedBoundsExtent.Y)) / (2.0f * this->cachedBoundsExtent.Y);
+	float normalizedX = (WorldPos.X - (boundsOrigin.X - boundsExtent.X)) / (2.0f * boundsExtent.X);
+	float normalizedY = (WorldPos.Y - (boundsOrigin.Y - boundsExtent.Y)) / (2.0f * boundsExtent.Y);
+	normalizedX = FMath::Clamp(normalizedX, 0.0f, 1.0f);
+	normalizedY = FMath::Clamp(normalizedY, 0.0f, 1.0f);
 
 	return FVector2D(normalizedY * WidgetSize.X, (1.0f - normalizedX) * WidgetSize.Y);
 }
@@ -120,19 +108,25 @@ FVector2D URTSCameraMinimapWidget::ConvertWorldToWidgetLocal(const FVector2D& Wo
 FVector2D URTSCameraMinimapWidget::ConvertWidgetLocalToWorld(const FVector2D& LocalPos, const FVector2D& WidgetSize) const
 {
 	/// 将小地图局部像素坐标反投影回世界地图水平面的 X/Y 坐标
-	if (WidgetSize.X <= 0.0f || WidgetSize.Y <= 0.0f) 
+	FVector boundsOrigin = FVector::ZeroVector;
+	FVector boundsExtent = FVector::ZeroVector;
+	if (!this->getCurrentBounds(boundsOrigin, boundsExtent) ||
+		boundsExtent.X < KINDA_SMALL_NUMBER ||
+		boundsExtent.Y < KINDA_SMALL_NUMBER ||
+		WidgetSize.X <= 0.0f ||
+		WidgetSize.Y <= 0.0f)
 	{
 		return FVector2D::ZeroVector;
 	}
 
-	float uParam = LocalPos.X / WidgetSize.X;
-	float vParam = LocalPos.Y / WidgetSize.Y;
+	float uParam = FMath::Clamp(LocalPos.X / WidgetSize.X, 0.0f, 1.0f);
+	float vParam = FMath::Clamp(LocalPos.Y / WidgetSize.Y, 0.0f, 1.0f);
 
 	float normalizedX = 1.0f - vParam;
 	float normalizedY = uParam;
 
-	float worldX = (this->cachedBoundsOrigin.X - this->cachedBoundsExtent.X) + normalizedX * (2.0f * this->cachedBoundsExtent.X);
-	float worldY = (this->cachedBoundsOrigin.Y - this->cachedBoundsExtent.Y) + normalizedY * (2.0f * this->cachedBoundsExtent.Y);
+	float worldX = (boundsOrigin.X - boundsExtent.X) + normalizedX * (2.0f * boundsExtent.X);
+	float worldY = (boundsOrigin.Y - boundsExtent.Y) + normalizedY * (2.0f * boundsExtent.Y);
 
 	return FVector2D(worldX, worldY);
 }
@@ -150,24 +144,27 @@ int32 URTSCameraMinimapWidget::NativePaint(
 	/// 执行基础绘制流程。注：如果当前组件没有被 Invalidate，Slate 可能会完全跳过此函数执行。
 	int32 maxLayerId = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 
-	if (!this->cachedRTSCamera || !this->bHasValidBounds)
-	{
-		const_cast<URTSCameraMinimapWidget*>(this)->findRTSCamera();
-	}
-
-	if (!this->cachedRTSCamera || !this->bHasValidBounds || !this->cachedSpringArm || !this->cachedCameraComponent)
-	{
-		return maxLayerId;
-	}
-
 	FVector2D geometrySize = AllottedGeometry.GetLocalSize();
 	if (geometrySize.X < 1.0f || geometrySize.Y < 1.0f)
 	{
 		return maxLayerId;
 	}
 
-	/// 战术兼容性调整：虽然静态数组更直接，但由于 Slate 的 MakeLines API 严格要求 TArray 类型容器，
-	/// 此处采用预分配空间的 TArray 以平衡性能与接口规范。
+	if (!this->cachedRTSCamera)
+	{
+		const_cast<URTSCameraMinimapWidget*>(this)->findRTSCamera();
+	}
+
+	FVector boundsOrigin = FVector::ZeroVector;
+	FVector boundsExtent = FVector::ZeroVector;
+	if (!this->cachedRTSCamera ||
+		!this->getCurrentBounds(boundsOrigin, boundsExtent) ||
+		boundsExtent.X < KINDA_SMALL_NUMBER ||
+		boundsExtent.Y < KINDA_SMALL_NUMBER)
+	{
+		return maxLayerId;
+	}
+
 	TArray<FVector2D> drawPoints;
 	drawPoints.Reserve(5);
 
@@ -191,7 +188,7 @@ int32 URTSCameraMinimapWidget::NativePaint(
 		AllottedGeometry.ToPaintGeometry(),
 		drawPoints,
 		ESlateDrawEffect::None,
-		FLinearColor::White,
+		FLinearColor(0.0f, 1.0f, 0.55f, 0.95f),
 		true,
 		this->lineWidth
 	);
@@ -207,8 +204,8 @@ FReply URTSCameraMinimapWidget::NativeOnMouseButtonDown(const FGeometry& InGeome
 		this->bIsDragging = true;
 		if (this->cachedRTSCamera)
 		{
-			FVector2D localPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
-			FVector2D worldPos = this->ConvertWidgetLocalToWorld(localPos, InGeometry.GetLocalSize());
+			const FVector2D localPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+			const FVector2D worldPos = this->ConvertWidgetLocalToWorld(localPos, InGeometry.GetLocalSize());
 			this->cachedRTSCamera->jumpTo(FVector(worldPos.X, worldPos.Y, 0.0f));
 		}
 		return FReply::Handled().CaptureMouse(this->TakeWidget());
@@ -234,8 +231,8 @@ FReply URTSCameraMinimapWidget::NativeOnMouseMove(const FGeometry& InGeometry, c
 	{
 		if (this->cachedRTSCamera)
 		{
-			FVector2D localPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
-			FVector2D worldPos = this->ConvertWidgetLocalToWorld(localPos, InGeometry.GetLocalSize());
+			const FVector2D localPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+			const FVector2D worldPos = this->ConvertWidgetLocalToWorld(localPos, InGeometry.GetLocalSize());
 			this->cachedRTSCamera->jumpTo(FVector(worldPos.X, worldPos.Y, 0.0f));
 		}
 		return FReply::Handled();

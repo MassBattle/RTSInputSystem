@@ -7,10 +7,14 @@
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "RTSInputPanelSettings.h"
 #include "RTSSelectable.h"
 #include "RTSSelectionSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Components/DecalComponent.h"
+#include "Components/MassBattleAgentComponent.h"
+#include "Materials/MaterialInterface.h"
 
 // Sets default values for this component's properties
 URTSSelector::URTSSelector(): PlayerController(nullptr), HUD(nullptr), bIsSelecting(false)
@@ -97,6 +101,11 @@ void URTSSelector::ClearSelectedActors_Implementation()
 void URTSSelector::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (bIsTargeting && bIsHashGridSelecting)
+	{
+		UpdateHashGridSelectionPreview();
+	}
 }
 
 void URTSSelector::CollectComponentDependencyReferences()
@@ -202,6 +211,13 @@ void URTSSelector::BindInputMappingContext()
 
 void URTSSelector::BeginTargeting(FGameplayTag CommandTag)
 {
+	if (ShouldUseHashGridSelectionForCommand(CommandTag))
+	{
+		BeginHashGridSelection(CommandTag);
+		return;
+	}
+
+	EndHashGridSelectionPreview();
 	bIsTargeting = true;
 	PendingCommandTag = CommandTag;
 	// Optional: Change mouse cursor to crosshair here
@@ -213,6 +229,13 @@ void URTSSelector::BeginTargeting(FGameplayTag CommandTag)
 
 void URTSSelector::CancelTargeting()
 {
+	if (bIsHashGridSelecting)
+	{
+		CancelHashGridSelection();
+		return;
+	}
+
+	EndHashGridSelectionPreview();
 	bIsTargeting = false;
 	PendingCommandTag = FGameplayTag::EmptyTag;
 	if (PlayerController)
@@ -232,6 +255,12 @@ void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 
 	if (bIsTargeting)
 	{
+		if (bIsHashGridSelecting)
+		{
+			CancelHashGridSelection();
+			return;
+		}
+
 		if (Hit.bBlockingHit)
 		{
 			if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
@@ -261,11 +290,16 @@ void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 		{
 			if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
 			{
-				// Smart Command Mapping:
-				// If we right click an actor, maybe we Attack?
-				// For simplicity, we just send Move to location. If it's an enemy, the user might want Attack.
-				// The Move command handles location by default.
-				SelectionSubsystem->IssueCommandWithLocation(FGameplayTag::RequestGameplayTag(FName("RTS.Command.Move"), false), Hit.Location);
+				AActor* HitActor = Hit.GetActor();
+				const FGameplayTag AttackTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
+				if (HitActor && HitActor->FindComponentByClass<UMassBattleAgentComponent>())
+				{
+					SelectionSubsystem->IssueCommandWithTarget(AttackTag, HitActor);
+				}
+				else
+				{
+					SelectionSubsystem->IssueCommandWithLocation(FGameplayTag::RequestGameplayTag(FName("RTS.Command.Move"), false), Hit.Location);
+				}
 			}
 		}
 	}
@@ -278,6 +312,12 @@ void URTSSelector::OnSelectionStart(const FInputActionValue& Value)
 	if (bIsTargeting)
 	{
 		bSkipCurrentSelectionClick = true;
+
+		if (bIsHashGridSelecting)
+		{
+			CommitHashGridSelection();
+			return;
+		}
 
 		if (PlayerController)
 		{
@@ -333,4 +373,282 @@ void URTSSelector::OnSelectionEnd(const FInputActionValue& Value)
 
 bool URTSSelector::CanSelectActor_Implementation(AActor *Actor) const {
 	return true;
+}
+
+void URTSSelector::BeginHashGridSelection(FGameplayTag CommandTag)
+{
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const FVector2D FootprintCells = Settings ? Settings->HashGridSelectionFootprintCells : FVector2D(3.0f, 3.0f);
+	const float CellSize = Settings ? Settings->HashGridCellSize : 400.0f;
+	BeginHashGridSelectionInternal(CommandTag, FootprintCells, CellSize);
+}
+
+void URTSSelector::BeginHashGridSelectionWithFootprint(FGameplayTag CommandTag, FVector2D FootprintCells, float CellSize)
+{
+	BeginHashGridSelectionInternal(CommandTag, FootprintCells, CellSize);
+}
+
+void URTSSelector::CancelHashGridSelection()
+{
+	if (!bIsHashGridSelecting)
+	{
+		return;
+	}
+
+	const FGameplayTag CancelledCommandTag = PendingCommandTag;
+	bIsHashGridSelecting = false;
+	EndHashGridSelectionPreview();
+	bIsTargeting = false;
+	PendingCommandTag = FGameplayTag::EmptyTag;
+	ActiveHashGridFootprintCells = FVector2D::ZeroVector;
+	ActiveHashGridCellSize = 0.0f;
+
+	if (PlayerController)
+	{
+		PlayerController->CurrentMouseCursor = EMouseCursor::Default;
+	}
+
+	OnHashGridSelectionCancelled.Broadcast(CancelledCommandTag);
+}
+
+bool URTSSelector::ShouldUseHashGridSelectionForCommand(FGameplayTag CommandTag) const
+{
+	return CommandTag.IsValid() && CommandTag.GetTagName().ToString().StartsWith(TEXT("RTS.Command.Build."));
+}
+
+FVector URTSSelector::SnapHashGridSelectionLocation(const FVector& Location) const
+{
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float CellSize = ActiveHashGridCellSize > KINDA_SMALL_NUMBER
+		? ActiveHashGridCellSize
+		: (Settings ? Settings->HashGridCellSize : 400.0f);
+
+	const bool bShouldSnap = !Settings || Settings->bSnapHashGridSelectionToGrid;
+	if (!bShouldSnap || CellSize <= KINDA_SMALL_NUMBER)
+	{
+		return Location;
+	}
+
+	FVector Snapped = Location;
+	Snapped.X = FMath::GridSnap(Snapped.X, CellSize);
+	Snapped.Y = FMath::GridSnap(Snapped.Y, CellSize);
+	return Snapped;
+}
+
+FIntPoint URTSSelector::GetHashGridCellForLocation(const FVector& Location) const
+{
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float CellSize = ActiveHashGridCellSize > KINDA_SMALL_NUMBER
+		? ActiveHashGridCellSize
+		: (Settings ? Settings->HashGridCellSize : 400.0f);
+
+	if (CellSize <= KINDA_SMALL_NUMBER)
+	{
+		return FIntPoint::ZeroValue;
+	}
+
+	return FIntPoint(
+		FMath::FloorToInt(Location.X / CellSize),
+		FMath::FloorToInt(Location.Y / CellSize)
+	);
+}
+
+bool URTSSelector::ProjectHashGridSelectionLocationToGround(const FVector& CandidateLocation, FVector& OutLocation) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float TraceHalfHeight = Settings ? Settings->HashGridSelectionTraceHalfHeight : 50000.0f;
+	const FVector TraceStart(CandidateLocation.X, CandidateLocation.Y, CandidateLocation.Z + TraceHalfHeight);
+	const FVector TraceEnd(CandidateLocation.X, CandidateLocation.Y, CandidateLocation.Z - TraceHalfHeight);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(RTSHashGridSelectionTrace), true);
+	if (PlayerController)
+	{
+		if (APawn* Pawn = PlayerController->GetPawn())
+		{
+			QueryParams.AddIgnoredActor(Pawn);
+		}
+	}
+
+	FHitResult Hit;
+	if (World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	{
+		OutLocation = Hit.Location;
+		return true;
+	}
+
+	OutLocation = CandidateLocation;
+	return true;
+}
+
+bool URTSSelector::GetHashGridSelectionResult(FRTSHashGridSelectionResult& OutResult) const
+{
+	if (!PlayerController)
+	{
+		return false;
+	}
+
+	FHitResult Hit;
+	PlayerController->GetHitResultUnderCursor(ECC_Visibility, false, Hit);
+	if (!Hit.bBlockingHit)
+	{
+		return false;
+	}
+
+	FVector WorldLocation = FVector::ZeroVector;
+	if (!ProjectHashGridSelectionLocationToGround(SnapHashGridSelectionLocation(Hit.Location), WorldLocation))
+	{
+		return false;
+	}
+
+	OutResult.CommandTag = PendingCommandTag;
+	OutResult.WorldLocation = WorldLocation;
+	OutResult.Cell = GetHashGridCellForLocation(WorldLocation);
+	OutResult.CellSize = ActiveHashGridCellSize;
+	OutResult.FootprintCells = ActiveHashGridFootprintCells;
+	return true;
+}
+
+void URTSSelector::BeginHashGridSelectionInternal(FGameplayTag CommandTag, FVector2D FootprintCells, float CellSize)
+{
+	EndHashGridSelectionPreview();
+
+	bIsTargeting = true;
+	bIsHashGridSelecting = true;
+	PendingCommandTag = CommandTag;
+	ActiveHashGridFootprintCells = FVector2D(
+		FMath::Max(1.0f, FootprintCells.X),
+		FMath::Max(1.0f, FootprintCells.Y)
+	);
+	ActiveHashGridCellSize = FMath::Max(1.0f, CellSize);
+
+	if (PlayerController)
+	{
+		PlayerController->CurrentMouseCursor = EMouseCursor::Crosshairs;
+	}
+
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	if (Settings && !Settings->bEnableHashGridSelectionPreview)
+	{
+		return;
+	}
+
+	if (!HashGridSelectionDecalComponent)
+	{
+		UObject* DecalOuter = GetOwner() ? static_cast<UObject*>(GetOwner()) : static_cast<UObject*>(this);
+		HashGridSelectionDecalComponent = NewObject<UDecalComponent>(DecalOuter, TEXT("RTSHashGridSelectionDecal"));
+		if (HashGridSelectionDecalComponent)
+		{
+			HashGridSelectionDecalComponent->RegisterComponentWithWorld(GetWorld());
+			HashGridSelectionDecalComponent->SetWorldRotation(FRotator(-90.0f, 0.0f, 0.0f));
+			HashGridSelectionDecalComponent->SetVisibility(false);
+			HashGridSelectionDecalComponent->FadeScreenSize = 0.0f;
+		}
+	}
+
+	if (!HashGridSelectionDecalComponent)
+	{
+		return;
+	}
+
+	if (!HashGridSelectionDecalComponent->GetDecalMaterial())
+	{
+		UMaterialInterface* DecalMaterial = Settings ? Settings->HashGridSelectionDecalMaterial.LoadSynchronous() : nullptr;
+		if (!DecalMaterial)
+		{
+			DecalMaterial = Cast<UMaterialInterface>(StaticLoadObject(
+				UMaterialInterface::StaticClass(),
+				nullptr,
+				TEXT("/OpenRTSCamera/Visualization/M_RTSBuildPlacementDecal.M_RTSBuildPlacementDecal")
+			));
+		}
+
+		if (DecalMaterial)
+		{
+			HashGridSelectionDecalComponent->SetDecalMaterial(DecalMaterial);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("RTSSelector: Missing hash-grid selection decal material."));
+		}
+	}
+
+	const float DecalDepth = Settings ? Settings->HashGridSelectionDecalDepth : 4096.0f;
+	HashGridSelectionDecalComponent->DecalSize = FVector(
+		FMath::Max(1.0f, DecalDepth),
+		FMath::Max(1.0f, ActiveHashGridFootprintCells.X * ActiveHashGridCellSize),
+		FMath::Max(1.0f, ActiveHashGridFootprintCells.Y * ActiveHashGridCellSize)
+	);
+
+	UpdateHashGridSelectionPreview();
+}
+
+void URTSSelector::UpdateHashGridSelectionPreview()
+{
+	if (!HashGridSelectionDecalComponent)
+	{
+		return;
+	}
+
+	FRTSHashGridSelectionResult Result;
+	if (GetHashGridSelectionResult(Result))
+	{
+		HashGridSelectionDecalComponent->SetWorldLocation(Result.WorldLocation + FVector(0.0f, 0.0f, 8.0f));
+		HashGridSelectionDecalComponent->SetWorldRotation(FRotator(-90.0f, 0.0f, 0.0f));
+		HashGridSelectionDecalComponent->SetVisibility(HashGridSelectionDecalComponent->GetDecalMaterial() != nullptr);
+	}
+	else
+	{
+		HashGridSelectionDecalComponent->SetVisibility(false);
+	}
+}
+
+void URTSSelector::EndHashGridSelectionPreview()
+{
+	if (HashGridSelectionDecalComponent)
+	{
+		HashGridSelectionDecalComponent->SetVisibility(false);
+	}
+}
+
+void URTSSelector::CommitHashGridSelection()
+{
+	FRTSHashGridSelectionResult Result;
+	const bool bHasResult = GetHashGridSelectionResult(Result);
+	const FGameplayTag CommandToIssue = PendingCommandTag;
+
+	bIsHashGridSelecting = false;
+	EndHashGridSelectionPreview();
+	bIsTargeting = false;
+	PendingCommandTag = FGameplayTag::EmptyTag;
+	ActiveHashGridFootprintCells = FVector2D::ZeroVector;
+	ActiveHashGridCellSize = 0.0f;
+
+	if (PlayerController)
+	{
+		PlayerController->CurrentMouseCursor = EMouseCursor::Default;
+	}
+
+	if (!bHasResult)
+	{
+		return;
+	}
+
+	OnHashGridSelectionCommitted.Broadcast(Result);
+
+	if (CommandToIssue.IsValid())
+	{
+		if (ULocalPlayer* LocalPlayer = PlayerController ? PlayerController->GetLocalPlayer() : nullptr)
+		{
+			if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
+			{
+				SelectionSubsystem->IssueCommandWithLocation(CommandToIssue, Result.WorldLocation);
+			}
+		}
+	}
 }

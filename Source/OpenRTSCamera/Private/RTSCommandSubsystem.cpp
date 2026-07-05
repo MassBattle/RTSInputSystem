@@ -9,6 +9,7 @@
 #include "FuncLibs/MassBattleFuncLib.h"
 #include "Components/MassBattleAgentComponent.h"
 #include "GameplayTagsManager.h"
+#include "RTSSelectionSubsystem.h"
 
 namespace
 {
@@ -56,6 +57,14 @@ void URTSCommandSubsystem::IssueCommandWithTarget(FGameplayTag Tag, AActor* Targ
 
 TArray<FEntityHandle> URTSCommandSubsystem::GetSelectedMassEntities() const
 {
+	if (ULocalPlayer* LP = const_cast<URTSCommandSubsystem*>(this)->GetLocalPlayer())
+	{
+		if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+		{
+			return Selection->GetSelectedEntities();
+		}
+	}
+
 	FMassBattleQuery Query;
 	Query.BattleAllFlagsList.Reset();
 	Query.BattleAllFlagsList.Add(EBattleFlags::Selected);

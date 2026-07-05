@@ -22,6 +22,7 @@ class OPENRTSCAMERA_API URTSCommanderGridWidget : public URTSActiveGroupWidget
 public:
 
 	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 	virtual void NativePreConstruct() override;
 	virtual void SynchronizeProperties() override;
 
@@ -45,7 +46,7 @@ protected:
 
     // Desired size for buttons (if enforced by logic, though usually WBP controls this)
     UPROPERTY(EditAnywhere, Category = "RTS Grid")
-    FVector2D ButtonSize = FVector2D(128.0f, 128.0f);
+    FVector2D ButtonSize = FVector2D(144.0f, 144.0f);
 
 	// Internal list of buttons (Keys = Index 0-14)
 	UPROPERTY()
@@ -82,8 +83,17 @@ protected:
     UFUNCTION(BlueprintCallable, Category = "RTS Grid")
     void RefreshVisuals();
 
+	void RegisterCommandPanelHotkeys();
+	void UnregisterCommandPanelHotkeys();
+	void ExecuteCommandPanelSlot(int32 SlotIndex);
+
     // Cache the active actor for context
     TWeakObjectPtr<AActor> ActiveActorPtr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UInputComponent> CommandPanelInputComponent;
+
+	TWeakObjectPtr<APlayerController> CommandPanelInputOwner;
 
     /** 当前正在显示的网格资产 (托管状态) */
     UPROPERTY()
@@ -91,6 +101,8 @@ protected:
 
     // 保存当前的视图数据，以便在点击子网格后刷新时复用
     FRTSSelectionView LastSelectionView;
+
+	FDelegateHandle CommandNavigationHandle;
 
 	// Test Asset for debugging
 	UPROPERTY(EditAnywhere, Category = "Debug")

@@ -22,7 +22,10 @@ public:
 	FString SelectionGroupKey;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
-	UTexture2D* Icon;
+	UTexture2D* Icon = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	UTexture2D* Avatar = nullptr;
 
 	// --- Status Data (Standard RTS) ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
