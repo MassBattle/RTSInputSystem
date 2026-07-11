@@ -14,7 +14,7 @@
 	"MarketplaceURL": "",
 	"Modules": [
 		{
-			"Name": "OpenRTSCamera",
+			"Name": "RTSInputSystem",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
 			"PlatformAllowList": [

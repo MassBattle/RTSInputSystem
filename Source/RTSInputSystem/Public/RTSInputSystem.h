@@ -1,0 +1,15 @@
+// Copyright 2024 Jesus Bracho All Rights Reserved.
+
+#pragma once
+
+#include <CoreMinimal.h>
+#include "Modules/ModuleManager.h"
+
+class FRTSInputSystemModule : public IModuleInterface
+{
+public:
+	virtual void StartupModule() override;
+	virtual void ShutdownModule() override;
+};
+
+DECLARE_LOG_CATEGORY_EXTERN(LogRTSInputSystem, Log, All);

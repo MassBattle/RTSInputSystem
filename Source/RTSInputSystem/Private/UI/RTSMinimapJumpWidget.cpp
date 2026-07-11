@@ -1,0 +1,312 @@
+// Copyright Winyunq, 2025. All Rights Reserved.
+
+#include "UI/RTSMinimapJumpWidget.h"
+#include "RTSCamera.h"
+#include "Components/ActorComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
+#include "Rendering/DrawElements.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
+#include "Engine/World.h"
+
+URTSMinimapJumpWidget::URTSMinimapJumpWidget(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	SetVisibility(ESlateVisibility::Visible);
+	ForceVolatile(true);
+}
+
+void URTSMinimapJumpWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	InitializeJumpWidget();
+}
+
+void URTSMinimapJumpWidget::InitializeJumpWidget()
+{
+	SetVisibility(ESlateVisibility::Visible);
+	SetIsFocusable(true);
+
+	if (APlayerController* PlayerController = GetOwningPlayer())
+	{
+		PlayerController->bEnableClickEvents = true;
+		PlayerController->bEnableMouseOverEvents = true;
+	}
+
+	LoadMapRegionBounds();
+
+	CachedJumpComponent = FindRTSCameraJumpComponent();
+	BindRTSCameraFrustumUpdates();
+}
+
+void URTSMinimapJumpWidget::NativeDestruct()
+{
+	if (URTSCamera* RTSCamera = Cast<URTSCamera>(CachedJumpComponent.Get()))
+	{
+		RTSCamera->onMinimapFrustumUpdated.RemoveAll(this);
+	}
+
+	Super::NativeDestruct();
+}
+
+void URTSMinimapJumpWidget::LoadMapRegionBounds()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		// 缺省大小 65536
+		MapOrigin = FVector::ZeroVector;
+		MapExtents = FVector(32768.0f, 32768.0f, 1.0f);
+		return;
+	}
+
+	FString MapName = World->GetMapName();
+	MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+	if (MapName.IsEmpty())
+	{
+		MapName = TEXT("Default");
+	}
+
+	FString IniPath = FPaths::ProjectConfigDir() / TEXT("MapRegion") / MapName / TEXT("MapRegion.ini");
+	if (!FPaths::FileExists(IniPath))
+	{
+		// 缺省大小 65536
+		MapOrigin = FVector::ZeroVector;
+		MapExtents = FVector(32768.0f, 32768.0f, 1.0f);
+		return;
+	}
+
+	FConfigFile IniFile;
+	IniFile.Read(IniPath);
+
+	float OriginX = 0.0f;
+	float OriginY = 0.0f;
+	float SizeX = 0.0f;
+	float SizeY = 0.0f;
+	if (!IniFile.GetFloat(TEXT("MapRegion"), TEXT("OriginX"), OriginX) ||
+		!IniFile.GetFloat(TEXT("MapRegion"), TEXT("OriginY"), OriginY) ||
+		!IniFile.GetFloat(TEXT("MapRegion"), TEXT("SizeX"), SizeX) ||
+		!IniFile.GetFloat(TEXT("MapRegion"), TEXT("SizeY"), SizeY))
+	{
+		// 缺省大小 65536
+		MapOrigin = FVector::ZeroVector;
+		MapExtents = FVector(32768.0f, 32768.0f, 1.0f);
+		return;
+	}
+
+	MapOrigin = FVector(OriginX + SizeX * 0.5f, OriginY + SizeY * 0.5f, 0.0f);
+	MapExtents = FVector(SizeX * 0.5f, SizeY * 0.5f, 1.0f);
+}
+
+void URTSMinimapJumpWidget::BindRTSCameraFrustumUpdates()
+{
+	URTSCamera* RTSCamera = Cast<URTSCamera>(CachedJumpComponent.Get());
+	if (!RTSCamera)
+	{
+		return;
+	}
+
+	RTSCamera->onMinimapFrustumUpdated.RemoveAll(this);
+	RTSCamera->onMinimapFrustumUpdated.AddUObject(this, &URTSMinimapJumpWidget::HandleMinimapFrustumUpdated);
+	RTSCamera->updateMinimapFrustum();
+}
+
+void URTSMinimapJumpWidget::HandleMinimapFrustumUpdated()
+{
+	Invalidate(EInvalidateWidgetReason::Paint);
+}
+
+#if WITH_EDITOR
+const FText URTSMinimapJumpWidget::GetPaletteCategory()
+{
+	return NSLOCTEXT("RTSInputSystem", "RTSMinimapJumpWidgetPaletteCategory", "RTS Input System");
+}
+#endif
+
+int32 URTSMinimapJumpWidget::NativePaint(
+	const FPaintArgs& Args,
+	const FGeometry& AllottedGeometry,
+	const FSlateRect& MyCullingRect,
+	FSlateWindowElementList& OutDrawElements,
+	int32 LayerId,
+	const FWidgetStyle& InWidgetStyle,
+	bool bParentEnabled) const
+{
+	const int32 MaxLayerId = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	if (!bDrawCameraFrustum || FrustumLineThickness <= 0.0f)
+	{
+		return MaxLayerId;
+	}
+
+	const FVector2D LocalSize = AllottedGeometry.GetLocalSize();
+	if (LocalSize.X <= 0.0f || LocalSize.Y <= 0.0f)
+	{
+		return MaxLayerId;
+	}
+
+	if (!CachedJumpComponent.IsValid())
+	{
+		URTSMinimapJumpWidget* MutableThis = const_cast<URTSMinimapJumpWidget*>(this);
+		MutableThis->CachedJumpComponent = MutableThis->FindRTSCameraJumpComponent();
+		MutableThis->BindRTSCameraFrustumUpdates();
+	}
+
+	const URTSCamera* RTSCamera = Cast<URTSCamera>(CachedJumpComponent.Get());
+	if (!RTSCamera)
+	{
+		return MaxLayerId;
+	}
+
+	TArray<FVector2D> Points;
+	Points.Reserve(5);
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		const FVector& WorldPoint = RTSCamera->minimapFrustumPoints[Index];
+		Points.Add(ConvertWorldToWidgetLocal(FVector2D(WorldPoint.X, WorldPoint.Y), LocalSize));
+	}
+	const FVector2D FirstPoint = Points[0];
+	Points.Add(FirstPoint);
+
+	const int32 FrustumLayerId = MaxLayerId + 1;
+	FSlateDrawElement::MakeLines(
+		OutDrawElements,
+		FrustumLayerId,
+		AllottedGeometry.ToPaintGeometry(),
+		Points,
+		ESlateDrawEffect::None,
+		FrustumLineColor,
+		true,
+		FrustumLineThickness);
+
+	return FrustumLayerId;
+}
+
+FVector2D URTSMinimapJumpWidget::ConvertWorldToWidgetLocal(const FVector2D& WorldPos, const FVector2D& WidgetSize) const
+{
+	if (MapExtents.X >= KINDA_SMALL_NUMBER && MapExtents.Y >= KINDA_SMALL_NUMBER)
+	{
+		float NormalizedX = (WorldPos.X - (MapOrigin.X - MapExtents.X)) / (2.0f * MapExtents.X);
+		float NormalizedY = (WorldPos.Y - (MapOrigin.Y - MapExtents.Y)) / (2.0f * MapExtents.Y);
+		NormalizedX = FMath::Clamp(NormalizedX, 0.0f, 1.0f);
+		NormalizedY = FMath::Clamp(NormalizedY, 0.0f, 1.0f);
+
+		return FVector2D(NormalizedY * WidgetSize.X, (1.0f - NormalizedX) * WidgetSize.Y);
+	}
+
+	return FVector2D::ZeroVector;
+}
+
+FVector2D URTSMinimapJumpWidget::ConvertWidgetLocalToWorld(const FVector2D& LocalPos, const FVector2D& WidgetSize) const
+{
+	if (WidgetSize.X <= 0.0f || WidgetSize.Y <= 0.0f)
+	{
+		return FVector2D::ZeroVector;
+	}
+
+	if (MapExtents.X >= KINDA_SMALL_NUMBER && MapExtents.Y >= KINDA_SMALL_NUMBER)
+	{
+		const float UParam = FMath::Clamp(LocalPos.X / WidgetSize.X, 0.0f, 1.0f);
+		const float VParam = FMath::Clamp(LocalPos.Y / WidgetSize.Y, 0.0f, 1.0f);
+		const float NormalizedX = 1.0f - VParam;
+		const float NormalizedY = UParam;
+
+		return FVector2D(
+			(MapOrigin.X - MapExtents.X) + NormalizedX * (2.0f * MapExtents.X),
+			(MapOrigin.Y - MapExtents.Y) + NormalizedY * (2.0f * MapExtents.Y));
+	}
+
+	return FVector2D::ZeroVector;
+}
+
+UActorComponent* URTSMinimapJumpWidget::FindRTSCameraJumpComponent() const
+{
+	APlayerController* PlayerController = GetOwningPlayer();
+	if (!PlayerController)
+	{
+		return nullptr;
+	}
+
+	auto FindOnActor = [this](AActor* Actor) -> UActorComponent*
+	{
+		return Actor ? Actor->FindComponentByClass<URTSCamera>() : nullptr;
+	};
+
+	if (UActorComponent* Component = FindOnActor(PlayerController->GetViewTarget()))
+	{
+		return Component;
+	}
+
+	return FindOnActor(PlayerController->GetPawn());
+}
+
+bool URTSMinimapJumpWidget::TryJumpToWorldLocation(const FVector& WorldLocation)
+{
+	if (!bAutoJumpToRTSCamera)
+	{
+		return false;
+	}
+
+	UActorComponent* JumpComponent = CachedJumpComponent.Get();
+	URTSCamera* RTSCamera = Cast<URTSCamera>(JumpComponent);
+	if (!RTSCamera)
+	{
+		JumpComponent = FindRTSCameraJumpComponent();
+		CachedJumpComponent = JumpComponent;
+		RTSCamera = Cast<URTSCamera>(JumpComponent);
+		if (RTSCamera)
+		{
+			BindRTSCameraFrustumUpdates();
+		}
+	}
+
+	if (!RTSCamera)
+	{
+		return false;
+	}
+
+	RTSCamera->jumpTo(WorldLocation);
+	return true;
+}
+
+void URTSMinimapJumpWidget::RequestWorldLocation(const FVector2D& WorldPos)
+{
+	const FVector WorldLocation(WorldPos, 0.0f);
+	OnWorldLocationRequested.Broadcast(WorldLocation);
+	TryJumpToWorldLocation(WorldLocation);
+}
+
+FReply URTSMinimapJumpWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		bIsDragging = true;
+		const FVector2D LocalPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+		const FVector2D WorldPos = ConvertWidgetLocalToWorld(LocalPos, InGeometry.GetLocalSize());
+		RequestWorldLocation(WorldPos);
+		return FReply::Handled().CaptureMouse(TakeWidget());
+	}
+	return FReply::Unhandled();
+}
+
+FReply URTSMinimapJumpWidget::NativeOnMouseButtonUp(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton && bIsDragging)
+	{
+		bIsDragging = false;
+		return FReply::Handled().ReleaseMouseCapture();
+	}
+	return FReply::Unhandled();
+}
+
+FReply URTSMinimapJumpWidget::NativeOnMouseMove(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (bIsDragging && HasMouseCapture())
+	{
+		const FVector2D LocalPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+		const FVector2D WorldPos = ConvertWidgetLocalToWorld(LocalPos, InGeometry.GetLocalSize());
+		RequestWorldLocation(WorldPos);
+		return FReply::Handled();
+	}
+	return FReply::Unhandled();
+}

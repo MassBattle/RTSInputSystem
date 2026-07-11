@@ -55,9 +55,9 @@ flowchart TD
 
 代码位置：
 
-- `Source/OpenRTSCamera/Public/RTSSelectionStructs.h`
-- `Source/OpenRTSCamera/Public/RTSSelectionSubsystem.h`
-- `Source/OpenRTSCamera/Private/RTSSelectionSubsystem.cpp`
+- `Source/RTSInputSystem/Public/RTSSelectionStructs.h`
+- `Source/RTSInputSystem/Public/RTSSelectionSubsystem.h`
+- `Source/RTSInputSystem/Private/RTSSelectionSubsystem.cpp`
 
 ### `FRTSUnitData`
 
@@ -100,8 +100,8 @@ flowchart TD
 
 代码位置：
 
-- `Source/OpenRTSCamera/Private/RTSSelector.cpp`
-- `Source/OpenRTSCamera/Private/RTSHUD.cpp`
+- `Source/RTSInputSystem/Private/RTSSelector.cpp`
+- `Source/RTSInputSystem/Private/RTSHUD.cpp`
 
 ### `URTSSelector`
 
@@ -163,9 +163,9 @@ Mass 选择的底层是 `UMassBattleFuncLib::ViewTraceForAgents()`，屏幕四�
 
 代码位置：
 
-- `URTSSelectionSubsystem::SetSelectedUnits()`：`Source/OpenRTSCamera/Private/RTSSelectionSubsystem.cpp:201`
-- `URTSSelectionSubsystem::BuildSelectionView()`：`Source/OpenRTSCamera/Private/RTSSelectionSubsystem.cpp:282`
-- `URTSSelectionSubsystem::BroadcastSelectionViewAndGrid()`：`Source/OpenRTSCamera/Private/RTSSelectionSubsystem.cpp:371`
+- `URTSSelectionSubsystem::SetSelectedUnits()`：`Source/RTSInputSystem/Private/RTSSelectionSubsystem.cpp:201`
+- `URTSSelectionSubsystem::BuildSelectionView()`：`Source/RTSInputSystem/Private/RTSSelectionSubsystem.cpp:282`
+- `URTSSelectionSubsystem::BroadcastSelectionViewAndGrid()`：`Source/RTSInputSystem/Private/RTSSelectionSubsystem.cpp:371`
 
 ### `SetSelectedUnits()`
 
@@ -238,10 +238,10 @@ Active group：
 
 代码位置：
 
-- `Source/OpenRTSCamera/Public/UI/RTSUnitPanelWidget.h`
-- `Source/OpenRTSCamera/Private/UI/RTSUnitPanelWidget.cpp`
-- `Source/OpenRTSCamera/Public/UI/RTSUnitIconWidget.h`
-- `Source/OpenRTSCamera/Private/UI/RTSUnitIconWidget.cpp`
+- `Source/RTSInputSystem/Public/UI/RTSUnitPanelWidget.h`
+- `Source/RTSInputSystem/Private/UI/RTSUnitPanelWidget.cpp`
+- `Source/RTSInputSystem/Public/UI/RTSUnitIconWidget.h`
+- `Source/RTSInputSystem/Private/UI/RTSUnitIconWidget.cpp`
 
 ### `URTSUnitPanelWidget`
 
@@ -295,8 +295,8 @@ Active group：
 
 代码位置：
 
-- `Source/OpenRTSCamera/Public/UI/RTSActiveGroupWidget.h`
-- `Source/OpenRTSCamera/Private/UI/RTSActiveGroupWidget.cpp`
+- `Source/RTSInputSystem/Public/UI/RTSActiveGroupWidget.h`
+- `Source/RTSInputSystem/Private/UI/RTSActiveGroupWidget.cpp`
 
 `URTSActiveGroupWidget` 是独立头像/当前组 widget，也监听 `OnSelectionChanged`。
 
@@ -315,11 +315,11 @@ Active group：
 
 代码位置：
 
-- `Source/OpenRTSCamera/Public/UI/RTSCommanderGridWidget.h`
-- `Source/OpenRTSCamera/Private/UI/RTSCommanderGridWidget.cpp`
-- `Source/OpenRTSCamera/Public/Data/RTSCommandButton.h`
-- `Source/OpenRTSCamera/Public/Data/RTSCommandGridAsset.h`
-- `Source/OpenRTSCamera/Public/Interfaces/RTSCommandInterface.h`
+- `Source/RTSInputSystem/Public/UI/RTSCommanderGridWidget.h`
+- `Source/RTSInputSystem/Private/UI/RTSCommanderGridWidget.cpp`
+- `Source/RTSInputSystem/Public/Data/RTSCommandButton.h`
+- `Source/RTSInputSystem/Public/Data/RTSCommandGridAsset.h`
+- `Source/RTSInputSystem/Public/Interfaces/RTSCommandInterface.h`
 
 ### Grid 初始化
 
@@ -566,16 +566,16 @@ SelectionSubsystem 负责构造这个 view，UI 不再自己决定 item 截断�
 
 | 模块 | 文件 | 重点 |
 | --- | --- | --- |
-| 选择数据结构 | `Source/OpenRTSCamera/Public/RTSSelectionStructs.h` | `FRTSUnitData`、`FRTSSelectionView` |
-| 选择状态源 | `Source/OpenRTSCamera/Private/RTSSelectionSubsystem.cpp` | `SetSelectedUnits()`、`BuildSelectionView()`、`BroadcastSelectionViewAndGrid()` |
-| 输入桥接 | `Source/OpenRTSCamera/Private/RTSSelector.cpp` | 选择输入、右键命令、targeting |
-| 框选判定 | `Source/OpenRTSCamera/Private/RTSHUD.cpp` | Actor/Mass 搜索、Shift/Ctrl 逻辑 |
-| 主选择面板 | `Source/OpenRTSCamera/Private/UI/RTSUnitPanelWidget.cpp` | 固定 UnitPanel、路由、grid pool、单体详情 |
-| 单个选择 icon | `Source/OpenRTSCamera/Private/UI/RTSUnitIconWidget.cpp` | icon 数据、点击行为 |
-| Active group | `Source/OpenRTSCamera/Private/UI/RTSActiveGroupWidget.cpp` | 当前组头像和 BP 事件 |
-| 命令卡 | `Source/OpenRTSCamera/Private/UI/RTSCommanderGridWidget.cpp` | 3x5 grid、hotkey、命令点击 |
-| 命令按钮数据 | `Source/OpenRTSCamera/Public/Data/RTSCommandButton.h` | CommandTag、TargetType、PreferredIndex |
-| 命令 grid 数据 | `Source/OpenRTSCamera/Public/Data/RTSCommandGridAsset.h` | button 列表 |
-| Actor 命令接口 | `Source/OpenRTSCamera/Public/Interfaces/RTSCommandInterface.h` | Actor grid、冷却、执行 |
-| Mass 命令执行 | `Source/OpenRTSCamera/Private/RTSCommandSubsystem.cpp` | Move/Attack/Stop/Hold/Patrol |
-| 配置 | `Source/OpenRTSCamera/Public/RTSInputPanelSettings.h` | Mass 头像、命令卡热键、HashGrid 设置 |
+| 选择数据结构 | `Source/RTSInputSystem/Public/RTSSelectionStructs.h` | `FRTSUnitData`、`FRTSSelectionView` |
+| 选择状态源 | `Source/RTSInputSystem/Private/RTSSelectionSubsystem.cpp` | `SetSelectedUnits()`、`BuildSelectionView()`、`BroadcastSelectionViewAndGrid()` |
+| 输入桥接 | `Source/RTSInputSystem/Private/RTSSelector.cpp` | 选择输入、右键命令、targeting |
+| 框选判定 | `Source/RTSInputSystem/Private/RTSHUD.cpp` | Actor/Mass 搜索、Shift/Ctrl 逻辑 |
+| 主选择面板 | `Source/RTSInputSystem/Private/UI/RTSUnitPanelWidget.cpp` | 固定 UnitPanel、路由、grid pool、单体详情 |
+| 单个选择 icon | `Source/RTSInputSystem/Private/UI/RTSUnitIconWidget.cpp` | icon 数据、点击行为 |
+| Active group | `Source/RTSInputSystem/Private/UI/RTSActiveGroupWidget.cpp` | 当前组头像和 BP 事件 |
+| 命令卡 | `Source/RTSInputSystem/Private/UI/RTSCommanderGridWidget.cpp` | 3x5 grid、hotkey、命令点击 |
+| 命令按钮数据 | `Source/RTSInputSystem/Public/Data/RTSCommandButton.h` | CommandTag、TargetType、PreferredIndex |
+| 命令 grid 数据 | `Source/RTSInputSystem/Public/Data/RTSCommandGridAsset.h` | button 列表 |
+| Actor 命令接口 | `Source/RTSInputSystem/Public/Interfaces/RTSCommandInterface.h` | Actor grid、冷却、执行 |
+| Mass 命令执行 | `Source/RTSInputSystem/Private/RTSCommandSubsystem.cpp` | Move/Attack/Stop/Hold/Patrol |
+| 配置 | `Source/RTSInputSystem/Public/RTSInputPanelSettings.h` | Mass 头像、命令卡热键、HashGrid 设置 |

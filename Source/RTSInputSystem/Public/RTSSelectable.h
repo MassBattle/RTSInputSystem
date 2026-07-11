@@ -1,0 +1,45 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "Engine/Texture2D.h"
+
+#include "RTSSelectable.generated.h"
+
+UCLASS(Blueprintable, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class RTSINPUTSYSTEM_API URTSSelectable : public UActorComponent
+{
+	GENERATED_BODY()
+public:
+	UFUNCTION(BlueprintCallable, BlueprintImplementableEvent, Category = "RTS Selection")
+	void OnSelected();
+
+	UFUNCTION(BlueprintCallable, BlueprintImplementableEvent, Category = "RTS Selection")
+	void OnDeselected();
+
+	// --- Visual Data ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	FString SelectionGroupKey;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	UTexture2D* Icon = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	UTexture2D* Avatar = nullptr;
+
+	// --- Status Data (Standard RTS) ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float Health = 100.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float MaxHealth = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float Energy = 0.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float MaxEnergy = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float Shield = 0.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Data")
+	float MaxShield = 0.0f;
+};
