@@ -2,15 +2,19 @@
 #include "Components/UniformGridSlot.h"
 #include "Components/InputComponent.h"
 #include "Blueprint/SlateBlueprintLibrary.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "Engine/Texture2D.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Framework/Application/SlateApplication.h"
 #include "RTSSelectionSubsystem.h" 
 #include "RTSInputPanelSettings.h"
 #include "Interfaces/RTSCommandInterface.h" 
 #include "RTSSelector.h"
 #include "RTSCommandSubsystem.h"
+#include "UI/RTSMinimapJumpWidget.h"
 #include "UI/RTSTooltipWidget.h"
 #include "HAL/FileManager.h"
 #include "ImageUtils.h"
@@ -110,6 +114,14 @@ namespace
 		return GetDefaultCommandPanelKey(SlotIndex);
 	}
 
+	FKey GetEffectiveCommandPanelKey(const URTSCommandButton* Button, int32 SlotIndex)
+	{
+		const FKey SlotKey = GetCommandPanelKey(SlotIndex);
+		return SlotKey.IsValid()
+			? SlotKey
+			: (Button ? Button->Hotkey : FKey());
+	}
+
 	bool AreCommandPanelHotkeysEnabled()
 	{
 		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
@@ -173,24 +185,22 @@ namespace
 			return TEXT("RTS_Command_Patrol.png");
 		}
 
-		const FString TagString = TagName.ToString();
-		if (TagString.StartsWith(TEXT("RTS.Command.Build.")))
-		{
-			return TEXT("RTS_Command_Hold.png");
-		}
-		if (TagString.StartsWith(TEXT("RTS.Command.Train.")))
-		{
-			return TEXT("RTS_Command_Move.png");
-		}
-
-		return TEXT("RTS_Command_Stop.png");
+		// Unknown commands deliberately have no substitute artwork. Their button uses
+		// DisplayName as a temporary face until a real icon is authored.
+		return nullptr;
 	}
 
 	UTexture2D* LoadDefaultCommandIcon(const FGameplayTag& CommandTag)
 	{
 		static TMap<FName, UTexture2D*> IconCache;
 
-		const FName CacheKey(*FString(GetDefaultCommandIconFileName(CommandTag)));
+		const TCHAR* IconFileName = GetDefaultCommandIconFileName(CommandTag);
+		if (!IconFileName)
+		{
+			return nullptr;
+		}
+
+		const FName CacheKey(IconFileName);
 		if (UTexture2D** CachedTexture = IconCache.Find(CacheKey))
 		{
 			return *CachedTexture;
@@ -202,7 +212,7 @@ namespace
 			TEXT("Content"),
 			TEXT("CommandIcons"),
 			TEXT("Source"),
-			GetDefaultCommandIconFileName(CommandTag)
+			IconFileName
 		);
 
 		UTexture2D* Texture = nullptr;
@@ -302,6 +312,7 @@ void URTSCommanderGridWidget::NativeConstruct()
 	}
 
 	RegisterCommandPanelHotkeys();
+	UpdateCommandStateVisuals();
 }
 
 void URTSCommanderGridWidget::NativeDestruct()
@@ -404,6 +415,8 @@ void URTSCommanderGridWidget::OnSelectionUpdated(const FRTSSelectionView& View)
 	{
 		UpdateGrid(nullptr);
 	}
+
+	UpdateCommandStateVisuals();
 }
 
 void URTSCommanderGridWidget::UpdateGrid(URTSCommandGridAsset* NewGrid)
@@ -441,10 +454,11 @@ void URTSCommanderGridWidget::RefreshVisuals()
     {
         if (GridButtons.IsValidIndex(i) && GridButtons[i])
         {
-            // 增量刷新时必须保留布局决定的快捷键（Q/W/E），否则会被重置为 None
-            GridButtons[i]->Init(SparseList[i], ActiveActorPtr.Get(), GetCommandPanelKey(i));
+			GridButtons[i]->Init(SparseList[i], ActiveActorPtr.Get(), GetEffectiveCommandPanelKey(SparseList[i], i));
         }
-    }
+	}
+	RebuildCommandPanelHotkeys();
+	UpdateCommandStateVisuals();
     UE_LOG(LogTemp, Verbose, TEXT("UI-Grid: Visuals Refreshed."));
 }
 
@@ -497,9 +511,12 @@ void URTSCommanderGridWidget::RefreshGrid(const TArray<URTSCommandButton*>& Butt
 	{
 		if (GridButtons.IsValidIndex(i) && GridButtons[i])
 		{
-			GridButtons[i]->Init(Buttons[i], ActiveActorPtr.Get(), GetCommandPanelKey(i));
+			GridButtons[i]->Init(Buttons[i], ActiveActorPtr.Get(), GetEffectiveCommandPanelKey(Buttons[i], i));
 		}
 	}
+
+	RebuildCommandPanelHotkeys();
+	UpdateCommandStateVisuals();
 }
 
 void URTSCommanderGridWidget::OnActorGridChanged()
@@ -568,7 +585,22 @@ void URTSCommanderGridWidget::OnGridButtonClicked(const FGameplayTag& CommandTag
                 {
                     if (URTSSelector* Selector = PC->FindComponentByClass<URTSSelector>())
                     {
-                        Selector->BeginTargeting(CommandTag);
+						if (ClickedData->PlacementFootprintCells.X > 0
+							&& ClickedData->PlacementFootprintCells.Y > 0)
+						{
+							const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+							const float CellSize = Settings ? Settings->HashGridCellSize : 16.0f;
+							Selector->BeginHashGridSelectionWithFootprintAndPreview(
+								CommandTag,
+								FVector2D(ClickedData->PlacementFootprintCells),
+								CellSize,
+								ClickedData->PlacementPreviewMesh.LoadSynchronous());
+						}
+						else
+						{
+							Selector->BeginTargetingWithType(CommandTag, ClickedData->TargetType);
+						}
+						UpdateCommandStateVisuals();
                         return;
                     }
                 }
@@ -586,6 +618,8 @@ void URTSCommanderGridWidget::OnGridButtonClicked(const FGameplayTag& CommandTag
                 // ordinary Mass commands through URTSCommandSubsystem.
                 ClickedData->Execute(nullptr);
             }
+
+			UpdateCommandStateVisuals();
         }
     }
 }
@@ -621,6 +655,7 @@ void URTSCommanderGridWidget::NotifyButtonHovered(URTSCommandButtonWidget* Btn, 
     {
         SharedTooltip->UpdateTooltip(Data);
         SharedTooltip->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+        PositionSharedTooltip();
         UE_LOG(LogTemp, Verbose, TEXT("Showing Tooltip for: %s"), *Data->DisplayName.ToString());
     }
 }
@@ -662,21 +697,63 @@ void URTSCommanderGridWidget::RegisterCommandPanelHotkeys()
 	CommandPanelInputComponent->bBlockInput = false;
 	CommandPanelInputComponent->RegisterComponentWithWorld(InputWorld);
 
-	for (int32 SlotIndex = 0; SlotIndex < CommandGridSlotCount; ++SlotIndex)
+	PC->PushInputComponent(CommandPanelInputComponent);
+	CommandPanelInputOwner = PC;
+	RebuildCommandPanelHotkeys();
+}
+
+void URTSCommanderGridWidget::RebuildCommandPanelHotkeys()
+{
+	if (!CommandPanelInputComponent)
 	{
-		const FKey Hotkey = GetCommandPanelKey(SlotIndex);
-		if (!Hotkey.IsValid())
+		// Some HUD widget trees acquire their owning player after NativeConstruct.
+		// A populated command card is a reliable point to retry registration.
+		RegisterCommandPanelHotkeys();
+		return;
+	}
+
+	CommandPanelInputComponent->KeyBindings.Reset();
+	TSet<FKey> BoundKeys;
+
+	for (int32 SlotIndex = 0; SlotIndex < GridButtons.Num(); ++SlotIndex)
+	{
+		URTSCommandButtonWidget* ButtonWidget = GridButtons[SlotIndex];
+		URTSCommandButton* ButtonData = ButtonWidget ? ButtonWidget->GetData() : nullptr;
+		if (!ButtonData)
 		{
 			continue;
 		}
 
-		FInputKeyBinding Binding(FInputChord(Hotkey), IE_Pressed);
-		Binding.bConsumeInput = true;
-		Binding.KeyDelegate.GetDelegateForManualSet().BindLambda([this, SlotIndex]()
+		const FKey Hotkey = GetEffectiveCommandPanelKey(ButtonData, SlotIndex);
+		if (!Hotkey.IsValid() || BoundKeys.Contains(Hotkey))
 		{
-			ExecuteCommandPanelSlot(SlotIndex);
+			continue;
+		}
+		BoundKeys.Add(Hotkey);
+
+		FInputKeyBinding PressedBinding(FInputChord(Hotkey), IE_Pressed);
+		PressedBinding.bConsumeInput = true;
+		PressedBinding.KeyDelegate.GetDelegateForManualSet().BindLambda(
+			[WeakThis = TWeakObjectPtr<URTSCommanderGridWidget>(this), SlotIndex, Hotkey]()
+		{
+			if (URTSCommanderGridWidget* Widget = WeakThis.Get())
+			{
+				Widget->HandleCommandPanelHotkeyPressed(SlotIndex, Hotkey);
+			}
 		});
-		CommandPanelInputComponent->KeyBindings.Add(MoveTemp(Binding));
+		CommandPanelInputComponent->KeyBindings.Add(MoveTemp(PressedBinding));
+
+		FInputKeyBinding ReleasedBinding(FInputChord(Hotkey), IE_Released);
+		ReleasedBinding.bConsumeInput = true;
+		ReleasedBinding.KeyDelegate.GetDelegateForManualSet().BindLambda(
+			[WeakThis = TWeakObjectPtr<URTSCommanderGridWidget>(this), Hotkey]()
+		{
+			if (URTSCommanderGridWidget* Widget = WeakThis.Get())
+			{
+				Widget->HandleCommandPanelHotkeyReleased(Hotkey);
+			}
+		});
+		CommandPanelInputComponent->KeyBindings.Add(MoveTemp(ReleasedBinding));
 	}
 
 	FInputKeyBinding TabBinding(FInputChord(EKeys::Tab), IE_Pressed);
@@ -692,13 +769,12 @@ void URTSCommanderGridWidget::RegisterCommandPanelHotkeys()
 		}
 	});
 	CommandPanelInputComponent->KeyBindings.Add(MoveTemp(TabBinding));
-
-	PC->PushInputComponent(CommandPanelInputComponent);
-	CommandPanelInputOwner = PC;
 }
 
 void URTSCommanderGridWidget::UnregisterCommandPanelHotkeys()
 {
+	StopHeldCommandHotkeyRepeat();
+
 	if (!CommandPanelInputComponent)
 	{
 		return;
@@ -712,6 +788,213 @@ void URTSCommanderGridWidget::UnregisterCommandPanelHotkeys()
 	CommandPanelInputComponent->DestroyComponent();
 	CommandPanelInputComponent = nullptr;
 	CommandPanelInputOwner.Reset();
+}
+
+void URTSCommanderGridWidget::ConfirmPendingTargetWithHotkey(
+	URTSSelector* Selector,
+	const FKey& Hotkey,
+	bool bRapidFire)
+{
+	if (!Selector || !Selector->bIsTargeting)
+	{
+		return;
+	}
+
+	if (FSlateApplication::IsInitialized())
+	{
+		const FVector2D CursorPosition = FSlateApplication::Get().GetCursorPos();
+		TArray<UUserWidget*> MinimapWidgets;
+		UWidgetBlueprintLibrary::GetAllWidgetsOfClass(
+			this,
+			MinimapWidgets,
+			URTSMinimapJumpWidget::StaticClass(),
+			false);
+
+		for (UUserWidget* CandidateWidget : MinimapWidgets)
+		{
+			URTSMinimapJumpWidget* MinimapWidget = Cast<URTSMinimapJumpWidget>(CandidateWidget);
+			if (MinimapWidget
+				&& MinimapWidget->HandlePendingTargetConfirmationAtScreenPosition(CursorPosition))
+			{
+				UE_CLOG(
+					!bRapidFire,
+					LogTemp,
+					Log,
+					TEXT("RTS quick-cast hotkey %s -> confirm current minimap target"),
+					*Hotkey.ToString());
+				return;
+			}
+		}
+	}
+
+	Selector->CommitPendingTargetingAtCursor();
+	UE_CLOG(
+		!bRapidFire,
+		LogTemp,
+		Log,
+		TEXT("RTS quick-cast hotkey %s -> confirm current viewport target"),
+		*Hotkey.ToString());
+}
+
+void URTSCommanderGridWidget::HandleCommandPanelHotkeyPressed(int32 SlotIndex, const FKey& Hotkey)
+{
+	StopHeldCommandHotkeyRepeat();
+
+	URTSCommandButtonWidget* ButtonWidget = GridButtons.IsValidIndex(SlotIndex)
+		? GridButtons[SlotIndex]
+		: nullptr;
+	URTSCommandButton* ButtonData = ButtonWidget ? ButtonWidget->GetData() : nullptr;
+	if (!ButtonData)
+	{
+		return;
+	}
+
+	HeldCommandHotkey = Hotkey;
+	HeldCommandSlotIndex = SlotIndex;
+
+	bool bConfirmedPendingTarget = false;
+	if (APlayerController* PC = GetOwningPlayer())
+	{
+		if (URTSSelector* Selector = PC->FindComponentByClass<URTSSelector>();
+			Selector
+				&& Selector->bIsTargeting
+				&& Selector->PendingCommandTag.MatchesTagExact(ButtonData->CommandTag))
+		{
+			ConfirmPendingTargetWithHotkey(Selector, Hotkey);
+			bConfirmedPendingTarget = true;
+		}
+	}
+
+	if (!bConfirmedPendingTarget)
+	{
+		UE_LOG(LogTemp, Log, TEXT("RTS command hotkey %s -> slot %d"), *Hotkey.ToString(), SlotIndex);
+		ExecuteCommandPanelSlot(SlotIndex);
+	}
+
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float RepeatDelay = Settings
+		? FMath::Max(0.01f, Settings->CommandPanelHotkeyRepeatDelay)
+		: (1.0f / 3.0f);
+	if (UWorld* TimerWorld = GetWorld())
+	{
+		TimerWorld->GetTimerManager().SetTimer(
+			CommandHotkeyRepeatTimer,
+			this,
+			&URTSCommanderGridWidget::BeginHeldCommandHotkeyRepeat,
+			RepeatDelay,
+			false);
+	}
+}
+
+void URTSCommanderGridWidget::HandleCommandPanelHotkeyReleased(const FKey& Hotkey)
+{
+	if (HeldCommandHotkey == Hotkey)
+	{
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("RTS command hotkey %s -> released"),
+			*Hotkey.ToString());
+		StopHeldCommandHotkeyRepeat();
+	}
+}
+
+void URTSCommanderGridWidget::BeginHeldCommandHotkeyRepeat()
+{
+	APlayerController* PC = CommandPanelInputOwner.Get();
+	URTSCommandButtonWidget* ButtonWidget = GridButtons.IsValidIndex(HeldCommandSlotIndex)
+		? GridButtons[HeldCommandSlotIndex]
+		: nullptr;
+	URTSCommandButton* ButtonData = ButtonWidget ? ButtonWidget->GetData() : nullptr;
+	URTSSelector* Selector = PC ? PC->FindComponentByClass<URTSSelector>() : nullptr;
+	const bool bQueueModifierDown = PC
+		&& (PC->IsInputKeyDown(EKeys::LeftShift)
+			|| PC->IsInputKeyDown(EKeys::RightShift));
+	if (!PC
+		|| !HeldCommandHotkey.IsValid()
+		|| !PC->IsInputKeyDown(HeldCommandHotkey)
+		|| !bQueueModifierDown
+		|| !ButtonWidget
+		|| ButtonWidget->GetVisibility() != ESlateVisibility::Visible
+		|| !ButtonData
+		|| GetEffectiveCommandPanelKey(ButtonData, HeldCommandSlotIndex) != HeldCommandHotkey
+		|| !Selector
+		|| !Selector->bIsTargeting
+		|| !Selector->PendingCommandTag.MatchesTagExact(ButtonData->CommandTag))
+	{
+		StopHeldCommandHotkeyRepeat();
+		return;
+	}
+
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float RepeatInterval = Settings
+		? FMath::Max(0.01f, Settings->CommandPanelHotkeyRepeatInterval)
+		: (1.0f / 24.0f);
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("RTS quick-cast rapid fire started: hotkey=%s rate=%.2f Hz"),
+		*HeldCommandHotkey.ToString(),
+		1.0f / RepeatInterval);
+
+	ConfirmPendingTargetWithHotkey(Selector, HeldCommandHotkey, true);
+	if (!HeldCommandHotkey.IsValid()
+		|| HeldCommandSlotIndex == INDEX_NONE
+		|| !Selector->bIsTargeting)
+	{
+		return;
+	}
+
+	if (UWorld* TimerWorld = GetWorld())
+	{
+		TimerWorld->GetTimerManager().SetTimer(
+			CommandHotkeyRepeatTimer,
+			this,
+			&URTSCommanderGridWidget::RepeatHeldCommandHotkey,
+			RepeatInterval,
+			true);
+	}
+}
+
+void URTSCommanderGridWidget::RepeatHeldCommandHotkey()
+{
+	APlayerController* PC = CommandPanelInputOwner.Get();
+	URTSCommandButtonWidget* ButtonWidget = GridButtons.IsValidIndex(HeldCommandSlotIndex)
+		? GridButtons[HeldCommandSlotIndex]
+		: nullptr;
+	URTSCommandButton* ButtonData = ButtonWidget ? ButtonWidget->GetData() : nullptr;
+	URTSSelector* Selector = PC ? PC->FindComponentByClass<URTSSelector>() : nullptr;
+	const bool bQueueModifierDown = PC
+		&& (PC->IsInputKeyDown(EKeys::LeftShift)
+			|| PC->IsInputKeyDown(EKeys::RightShift));
+	if (!PC
+		|| !HeldCommandHotkey.IsValid()
+		|| !PC->IsInputKeyDown(HeldCommandHotkey)
+		|| !bQueueModifierDown
+		|| !ButtonWidget
+		|| ButtonWidget->GetVisibility() != ESlateVisibility::Visible
+		|| !ButtonData
+		|| GetEffectiveCommandPanelKey(ButtonData, HeldCommandSlotIndex) != HeldCommandHotkey
+		|| !Selector
+		|| !Selector->bIsTargeting
+		|| !Selector->PendingCommandTag.MatchesTagExact(ButtonData->CommandTag))
+	{
+		StopHeldCommandHotkeyRepeat();
+		return;
+	}
+
+	ConfirmPendingTargetWithHotkey(Selector, HeldCommandHotkey, true);
+}
+
+void URTSCommanderGridWidget::StopHeldCommandHotkeyRepeat()
+{
+	if (UWorld* TimerWorld = GetWorld())
+	{
+		TimerWorld->GetTimerManager().ClearTimer(CommandHotkeyRepeatTimer);
+	}
+	CommandHotkeyRepeatTimer.Invalidate();
+	HeldCommandHotkey = FKey();
+	HeldCommandSlotIndex = INDEX_NONE;
 }
 
 void URTSCommanderGridWidget::ExecuteCommandPanelSlot(int32 SlotIndex)
@@ -733,50 +1016,101 @@ void URTSCommanderGridWidget::ExecuteCommandPanelSlot(int32 SlotIndex)
 		return;
 	}
 
+	ButtonWidget->PlayKeyboardPressFeedback();
 	OnGridButtonClicked(ButtonData->CommandTag);
 }
 
-void URTSCommanderGridWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+void URTSCommanderGridWidget::UpdateCommandStateVisuals()
 {
-    Super::NativeTick(MyGeometry, InDeltaTime);
+	FGameplayTag ActiveCommandTag;
+	if (ULocalPlayer* LP = ResolveCommanderGridLocalPlayer(this))
+	{
+		APlayerController* PC = GetOwningPlayer();
+		if (!PC)
+		{
+			PC = LP->GetPlayerController(GetWorld());
+		}
 
-    if (SharedTooltip && SharedTooltip->GetVisibility() == ESlateVisibility::SelfHitTestInvisible)
-    {
-        const FVector2D TooltipSize = GetTooltipDesiredSize(SharedTooltip, FVector2D(380.0f, 220.0f));
+		if (URTSSelector* Selector = PC ? PC->FindComponentByClass<URTSSelector>() : nullptr;
+			Selector && Selector->bIsTargeting)
+		{
+			ActiveCommandTag = Selector->PendingCommandTag;
+		}
+		else if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
+		{
+			if (URTSCommandSubsystem* Commands = LP->GetSubsystem<URTSCommandSubsystem>())
+			{
+				ActiveCommandTag = Commands->GetActiveCommandTag(Selection->GetActiveMassEntities());
+			}
+		}
+	}
 
-        if (bFixedTooltipAboveGrid)
-        {
-            const FGeometry& AnchorGeometry = CommandGridPanel ? CommandGridPanel->GetCachedGeometry() : MyGeometry;
-            FVector2D PixelPosition;
-            FVector2D AnchorViewportPosition;
-            USlateBlueprintLibrary::AbsoluteToViewport(this, AnchorGeometry.GetAbsolutePosition(), PixelPosition, AnchorViewportPosition);
+	for (URTSCommandButtonWidget* ButtonWidget : GridButtons)
+	{
+		if (!ButtonWidget)
+		{
+			continue;
+		}
 
-            const FVector2D AnchorSize = AnchorGeometry.GetLocalSize();
-            FVector2D FinalPos(
-                AnchorViewportPosition.X + (AnchorSize.X - TooltipSize.X) * 0.5f,
-                AnchorViewportPosition.Y - TooltipSize.Y + TooltipYOffset
-            );
+		ButtonWidget->RefreshCommandState();
+		URTSCommandButton* ButtonData = ButtonWidget->GetData();
+		ButtonWidget->SetCommandActive(
+			ButtonData
+			&& ActiveCommandTag.IsValid()
+			&& ButtonData->CommandTag.MatchesTagExact(ActiveCommandTag));
+	}
+}
 
-            FinalPos = ClampTooltipPosition(this, FinalPos, TooltipSize, TooltipViewportMargin);
-            SharedTooltip->SetPositionInViewport(FinalPos, false);
-        }
-        else
-        {
-            const FVector2D MousePos = UWidgetLayoutLibrary::GetMousePositionOnViewport(this);
-            const FVector2D ViewportSize = GetViewportSizeInSlateUnits(this);
+void URTSCommanderGridWidget::PositionSharedTooltip()
+{
+	if (!SharedTooltip
+		|| SharedTooltip->GetVisibility() != ESlateVisibility::SelfHitTestInvisible)
+	{
+		return;
+	}
 
-            FVector2D FinalPos = MousePos + TooltipMouseOffset;
-            if (FinalPos.X + TooltipSize.X > ViewportSize.X - TooltipViewportMargin)
-            {
-                FinalPos.X = MousePos.X - TooltipSize.X - TooltipMouseOffset.X;
-            }
-            if (FinalPos.Y + TooltipSize.Y > ViewportSize.Y - TooltipViewportMargin)
-            {
-                FinalPos.Y = MousePos.Y - TooltipSize.Y - TooltipMouseOffset.Y;
-            }
+	const FVector2D TooltipSize =
+		GetTooltipDesiredSize(SharedTooltip, FVector2D(380.0f, 220.0f));
 
-            FinalPos = ClampTooltipPosition(this, FinalPos, TooltipSize, TooltipViewportMargin);
-            SharedTooltip->SetPositionInViewport(FinalPos, false);
-        }
-    }
+	if (bFixedTooltipAboveGrid)
+	{
+		const FGeometry AnchorGeometry = CommandGridPanel
+			? CommandGridPanel->GetCachedGeometry()
+			: GetCachedGeometry();
+		FVector2D PixelPosition;
+		FVector2D AnchorViewportPosition;
+		USlateBlueprintLibrary::AbsoluteToViewport(
+			this,
+			AnchorGeometry.GetAbsolutePosition(),
+			PixelPosition,
+			AnchorViewportPosition);
+
+		const FVector2D AnchorSize = AnchorGeometry.GetLocalSize();
+		FVector2D FinalPos(
+			AnchorViewportPosition.X + (AnchorSize.X - TooltipSize.X) * 0.5f,
+			AnchorViewportPosition.Y - TooltipSize.Y + TooltipYOffset);
+
+		FinalPos = ClampTooltipPosition(
+			this, FinalPos, TooltipSize, TooltipViewportMargin);
+		SharedTooltip->SetPositionInViewport(FinalPos, false);
+		return;
+	}
+
+	const FVector2D MousePos =
+		UWidgetLayoutLibrary::GetMousePositionOnViewport(this);
+	const FVector2D ViewportSize = GetViewportSizeInSlateUnits(this);
+
+	FVector2D FinalPos = MousePos + TooltipMouseOffset;
+	if (FinalPos.X + TooltipSize.X > ViewportSize.X - TooltipViewportMargin)
+	{
+		FinalPos.X = MousePos.X - TooltipSize.X - TooltipMouseOffset.X;
+	}
+	if (FinalPos.Y + TooltipSize.Y > ViewportSize.Y - TooltipViewportMargin)
+	{
+		FinalPos.Y = MousePos.Y - TooltipSize.Y - TooltipMouseOffset.Y;
+	}
+
+	FinalPos = ClampTooltipPosition(
+		this, FinalPos, TooltipSize, TooltipViewportMargin);
+	SharedTooltip->SetPositionInViewport(FinalPos, false);
 }

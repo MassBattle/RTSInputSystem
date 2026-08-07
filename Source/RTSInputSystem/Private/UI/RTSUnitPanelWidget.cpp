@@ -1,10 +1,13 @@
 #include "UI/RTSUnitPanelWidget.h"
+#include "UI/RTSCommandButtonWidget.h"
+#include "UI/RTSCommanderGridWidget.h"
 #include "UI/RTSUnitIconWidget.h"
 #include "RTSInputPanelSettings.h"
 #include "RTSSelectionSubsystem.h"
 #include "Components/PanelWidget.h"
 #include "Components/Image.h"
 #include "Components/TextBlock.h"
+#include "Interfaces/RTSCommandProgressProvider.h"
 #include "Components/ProgressBar.h"
 #include "Components/Border.h"
 #include "Components/BorderSlot.h"
@@ -19,6 +22,7 @@
 #include "Components/GridSlot.h"
 #include "Components/WrapBox.h"
 #include "Blueprint/WidgetTree.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -284,6 +288,10 @@ void URTSUnitPanelWidget::ApplyFixedPanelSlotLayout()
 	{
 		Shield->SetFillColorAndOpacity(FLinearColor(0.62f, 0.82f, 1.0f, 1.0f));
 	}
+	if (UProgressBar* Activity = Cast<UProgressBar>(FindDescendantWidgetByName(Cast<UWidget>(this), TEXT("ActivityBar"))))
+	{
+		Activity->SetFillColorAndOpacity(FLinearColor(1.0f, 0.72f, 0.16f, 1.0f));
+	}
 }
 
 TSharedRef<SWidget> URTSUnitPanelWidget::RebuildWidget()
@@ -421,7 +429,6 @@ void URTSUnitPanelWidget::NativeConstruct()
 			TEXT("/Game/UI/HeadUpDisplay/UnitDetails/Unit.Unit_C")
 		);
 	}
-
 	if (!IconContainer)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("RTSUnitPanelWidget: IconContainer is not bound. UnitPanel shell can remain visible, but list/summary content cannot be built."));
@@ -436,6 +443,7 @@ void URTSUnitPanelWidget::NativeConstruct()
 		UE_LOG(LogTemp, Log, TEXT("RTSUnitPanelWidget: Initializing Pool for %d x %d = %d slots."), MaxRows, MaxColumns, ItemsPerPage);
 
 		IconSlots.Reset();
+		ProgressButtonSlots.Reset();
 		CountSlots.Reset();
 
 		// Support for various container types
@@ -557,6 +565,9 @@ void URTSUnitPanelWidget::NativeConstruct()
 		UE_LOG(LogTemp, Warning, TEXT("RTSUnitPanelWidget: IconWidgetClass is NULL! Grid will be empty. Set it in Details or add a template child."));
 	}
 
+	// The panel shell itself must not remain as an empty white rectangle.
+	ShowEmptyContent();
+
 	if (APlayerController* PC = GetOwningPlayer())
 	{
 		if (ULocalPlayer* LP = PC->GetLocalPlayer())
@@ -564,6 +575,16 @@ void URTSUnitPanelWidget::NativeConstruct()
 			if (URTSSelectionSubsystem* Subsystem = LP->GetSubsystem<URTSSelectionSubsystem>())
 			{
 				Subsystem->OnSelectionChanged.AddUniqueDynamic(this, &URTSUnitPanelWidget::OnSelectionUpdated);
+				Subsystem->OnControlGroupsChanged.AddUniqueDynamic(this, &URTSUnitPanelWidget::OnControlGroupsUpdated);
+				CommandProgressChangedHandle =
+					Subsystem->OnCommandProgressChanged.AddUObject(
+						this,
+						&URTSUnitPanelWidget::OnCommandProgressChanged);
+				OnControlGroupsUpdated(Subsystem->GetControlGroupsView());
+				if (Subsystem->HasSelectedActors() || Subsystem->HasSelectedMass())
+				{
+					Subsystem->RequestSelectionRefresh();
+				}
 			}
 		}
 	}
@@ -571,6 +592,8 @@ void URTSUnitPanelWidget::NativeConstruct()
 
 void URTSUnitPanelWidget::NativeDestruct()
 {
+	HideGridSlots();
+
 	if (APlayerController* PC = GetOwningPlayer())
 	{
 		if (ULocalPlayer* LP = PC->GetLocalPlayer())
@@ -578,6 +601,13 @@ void URTSUnitPanelWidget::NativeDestruct()
 			if (URTSSelectionSubsystem* Subsystem = LP->GetSubsystem<URTSSelectionSubsystem>())
 			{
 				Subsystem->OnSelectionChanged.RemoveDynamic(this, &URTSUnitPanelWidget::OnSelectionUpdated);
+				Subsystem->OnControlGroupsChanged.RemoveDynamic(this, &URTSUnitPanelWidget::OnControlGroupsUpdated);
+				if (CommandProgressChangedHandle.IsValid())
+				{
+					Subsystem->OnCommandProgressChanged.Remove(
+						CommandProgressChangedHandle);
+					CommandProgressChangedHandle.Reset();
+				}
 			}
 		}
 	}
@@ -587,7 +617,110 @@ void URTSUnitPanelWidget::NativeDestruct()
 
 void URTSUnitPanelWidget::OnSelectionUpdated(const FRTSSelectionView& View)
 {
+	DisplayedProgressProvider = View.Mode == ERTSSelectionMode::Single
+		? View.SingleUnit.ActorPtr
+		: nullptr;
 	RefreshGrid(View);
+}
+
+void URTSUnitPanelWidget::OnCommandProgressChanged(
+	AActor* ProgressProvider)
+{
+	if (!ProgressProvider
+		|| DisplayedProgressProvider.Get() != ProgressProvider
+		|| !ProgressProvider->Implements<URTSCommandProgressProvider>())
+	{
+		return;
+	}
+
+	TArray<FRTSTimedCommandInstance> ProgressItems;
+	IRTSCommandProgressProvider::Execute_GetCommandProgressItems(
+		ProgressProvider,
+		ProgressItems);
+	const bool bHasProgressItems = !ProgressItems.IsEmpty();
+	const FRTSTimedCommandInstance* ActiveItem =
+		ProgressItems.FindByPredicate(
+			[](const FRTSTimedCommandInstance& Item)
+			{
+				return Item.State != ERTSTimedCommandState::Queued;
+			});
+
+	// Update only the activity fields. Health, portrait and the rest of the single
+	// selection view remain untouched, so an activity change never rebuilds the
+	// whole panel.
+	DisplayedSingleUnitData.ActorPtr = ProgressProvider;
+	DisplayedSingleUnitData.CommandProgressItems = ProgressItems;
+	DisplayedSingleUnitData.bHasActivity = ActiveItem != nullptr;
+	DisplayedSingleUnitData.ActivityLabel =
+		ActiveItem
+			? (ActiveItem->CommandButton
+				? ActiveItem->CommandButton->DisplayName
+				: (!ActiveItem->DisplayName.IsEmpty()
+					? ActiveItem->DisplayName
+					: FText::FromName(ActiveItem->PayloadId)))
+			: FText::GetEmpty();
+	DisplayedSingleUnitData.ActivityProgress =
+		ActiveItem ? ActiveItem->GetProgress01() : 0.0f;
+	DisplayedSingleUnitData.ActivityRemainingSeconds =
+		ActiveItem ? ActiveItem->GetRemainingSeconds() : 0.0f;
+	DisplayedSingleUnitData.ActivityQueueCount = ProgressItems.Num();
+	RefreshSingleUnitActivity(DisplayedSingleUnitData);
+
+	if (bHasProgressItems)
+	{
+		FRTSUnitData ProgressData;
+		ProgressData.ActorPtr = ProgressProvider;
+		ProgressData.CommandProgressItems = MoveTemp(ProgressItems);
+		ShowCommandProgressItems(ProgressData);
+	}
+	else
+	{
+		HideGridSlots();
+	}
+
+	if (IconContainer)
+	{
+		IconContainer->SetVisibility(
+			bHasProgressItems
+				? ESlateVisibility::Visible
+				: ESlateVisibility::Collapsed);
+	}
+	if (UnitRosterPane)
+	{
+		UnitRosterPane->SetVisibility(
+			bHasProgressItems
+				? ESlateVisibility::SelfHitTestInvisible
+				: ESlateVisibility::Collapsed);
+	}
+	if (UnitPanelBodyGap)
+	{
+		UnitPanelBodyGap->SetVisibility(
+			bHasProgressItems
+				? ESlateVisibility::HitTestInvisible
+				: ESlateVisibility::Collapsed);
+	}
+}
+
+void URTSUnitPanelWidget::OnControlGroupsUpdated(const FRTSControlGroupsView& View)
+{
+	int32 AssignedGroupCount = 0;
+	for (const FRTSControlGroupView& Group : View.Groups)
+	{
+		AssignedGroupCount += Group.bAssigned ? 1 : 0;
+	}
+
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const int32 Columns = Settings ? FMath::Max(1, Settings->SelectionGridColumns) : 8;
+	const float CardHeight = Settings ? FMath::Max(1, Settings->FormationListSlotHeight) : 64.0f;
+	const float RowGap = Settings ? FMath::Max(0.0f, Settings->FormationListSlotGap) : 4.0f;
+	const float MinimumVisibleHeaderHeight = Settings ? FMath::Max(0.0f, Settings->SelectionPanelHeaderHeight) : 68.0f;
+	const int32 VisibleRows = AssignedGroupCount > 0 ? FMath::DivideAndRoundUp(AssignedGroupCount, Columns) : 0;
+
+	PanelHeaderHeight = VisibleRows > 0
+		? FMath::Max(MinimumVisibleHeaderHeight, VisibleRows * (CardHeight + RowGap))
+		: 0.0f;
+	ApplyFixedPanelBounds();
+	InvalidateLayoutAndVolatility();
 }
 
 void URTSUnitPanelWidget::RefreshGrid(const FRTSSelectionView& View)
@@ -622,6 +755,7 @@ void URTSUnitPanelWidget::RefreshGrid(const FRTSSelectionView& View)
 void URTSUnitPanelWidget::ShowEmptyContent()
 {
 	HideGridSlots();
+	DisplayedSingleUnitData = FRTSUnitData();
 
 	if (IconContainer)
 	{
@@ -642,25 +776,58 @@ void URTSUnitPanelWidget::ShowEmptyContent()
 	{
 		UnitDetailPane->SetVisibility(ESlateVisibility::Hidden);
 	}
+
+	SetVisibility(ESlateVisibility::Collapsed);
 }
 
 void URTSUnitPanelWidget::ShowSingleContent(const FRTSUnitData& Data)
 {
-	HideGridSlots();
+	DisplayedSingleUnitData = Data;
+	const bool bHasProgressItems = !Data.CommandProgressItems.IsEmpty();
+	for (URTSUnitIconWidget* IconSlot : IconSlots)
+	{
+		if (IconSlot)
+		{
+			IconSlot->SetVisibility(ESlateVisibility::Hidden);
+		}
+	}
+	for (UTextBlock* CountSlot : CountSlots)
+	{
+		if (CountSlot)
+		{
+			CountSlot->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	if (!bHasProgressItems)
+	{
+		for (URTSCommandButtonWidget* ProgressButton : ProgressButtonSlots)
+		{
+			if (ProgressButton)
+			{
+				ProgressButton->SetVisibility(ESlateVisibility::Hidden);
+			}
+		}
+	}
 
 	if (IconContainer)
 	{
-		IconContainer->SetVisibility(ESlateVisibility::Collapsed);
+		IconContainer->SetVisibility(bHasProgressItems
+			? ESlateVisibility::Visible
+			: ESlateVisibility::Collapsed);
 	}
 
 	if (UnitRosterPane)
 	{
-		UnitRosterPane->SetVisibility(ESlateVisibility::Collapsed);
+		UnitRosterPane->SetVisibility(bHasProgressItems
+			? ESlateVisibility::SelfHitTestInvisible
+			: ESlateVisibility::Collapsed);
 	}
 
 	if (UnitPanelBodyGap)
 	{
-		UnitPanelBodyGap->SetVisibility(ESlateVisibility::Collapsed);
+		UnitPanelBodyGap->SetVisibility(bHasProgressItems
+			? ESlateVisibility::HitTestInvisible
+			: ESlateVisibility::Collapsed);
 	}
 
 	if (UnitDetailPane)
@@ -669,10 +836,165 @@ void URTSUnitPanelWidget::ShowSingleContent(const FRTSUnitData& Data)
 	}
 
 	RefreshSingleUnitDetail(Data);
+	if (bHasProgressItems)
+	{
+		ShowCommandProgressItems(Data);
+	}
+	else
+	{
+		HideGridSlots();
+	}
+}
+
+void URTSUnitPanelWidget::ShowCommandProgressItems(const FRTSUnitData& OwnerData)
+{
+	if (!IconContainer)
+	{
+		return;
+	}
+
+	TArray<UUserWidget*> CommanderGridWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(
+		this,
+		CommanderGridWidgets,
+		URTSCommanderGridWidget::StaticClass(),
+		false);
+	TSubclassOf<URTSCommandButtonWidget> ResolvedButtonClass =
+		CommandButtonWidgetClass;
+	if (!ResolvedButtonClass)
+	{
+		for (UUserWidget* CandidateWidget : CommanderGridWidgets)
+		{
+			if (const URTSCommanderGridWidget* CommanderGrid =
+				Cast<URTSCommanderGridWidget>(CandidateWidget))
+			{
+				ResolvedButtonClass =
+					CommanderGrid->GetCommandButtonWidgetClass();
+				if (ResolvedButtonClass)
+				{
+					break;
+				}
+			}
+		}
+	}
+	if (!ResolvedButtonClass)
+	{
+		ResolvedButtonClass = LoadClass<URTSCommandButtonWidget>(
+			nullptr,
+			TEXT("/Game/UI/HeadUpDisplay/ControlGird/CommandButton.CommandButton_C"));
+	}
+
+	TArray<URTSCommandButtonWidget*> UpdatedProgressButtons;
+	const int32 VisibleCount = FMath::Min(
+		OwnerData.CommandProgressItems.Num(),
+		ItemsPerPage);
+	for (int32 Index = 0; Index < VisibleCount; ++Index)
+	{
+		const FRTSTimedCommandInstance& ProgressItem =
+			OwnerData.CommandProgressItems[Index];
+		const FName ProgressItemId = ProgressItem.InstanceId.IsValid()
+			? FName(*ProgressItem.InstanceId.ToString(EGuidFormats::Digits))
+			: NAME_None;
+		URTSCommandButtonWidget* ButtonWidget = nullptr;
+		for (URTSCommandButtonWidget* ExistingButton : ProgressButtonSlots)
+		{
+			if (ExistingButton
+				&& ExistingButton->GetProgressItemId() == ProgressItemId)
+			{
+				ButtonWidget = ExistingButton;
+				break;
+			}
+		}
+
+		if (!ButtonWidget)
+		{
+			ButtonWidget = ResolvedButtonClass
+				? CreateWidget<URTSCommandButtonWidget>(
+					this, ResolvedButtonClass)
+				: nullptr;
+		}
+
+		if (!ButtonWidget)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("RTSUnitPanelWidget: could not create activity button for progress item %s."),
+				*ProgressItemId.ToString());
+			continue;
+		}
+
+		if (ButtonWidget->GetParent() != IconContainer)
+		{
+			ButtonWidget->RemoveFromParent();
+			if (UUniformGridPanel* UniformGrid =
+				Cast<UUniformGridPanel>(IconContainer))
+			{
+				UniformGrid->AddChildToUniformGrid(ButtonWidget, 0, 0);
+			}
+			else if (UGridPanel* GenericGrid =
+				Cast<UGridPanel>(IconContainer))
+			{
+				GenericGrid->AddChildToGrid(ButtonWidget, 0, 0);
+			}
+			else if (UWrapBox* WrapBox = Cast<UWrapBox>(IconContainer))
+			{
+				WrapBox->AddChildToWrapBox(ButtonWidget);
+			}
+			else
+			{
+				IconContainer->AddChild(ButtonWidget);
+			}
+		}
+
+		const int32 Row = MaxColumns > 0 ? Index / MaxColumns : 0;
+		const int32 Column = MaxColumns > 0 ? Index % MaxColumns : 0;
+		if (UUniformGridSlot* UniformSlot =
+			Cast<UUniformGridSlot>(ButtonWidget->Slot))
+		{
+			UniformSlot->SetRow(Row);
+			UniformSlot->SetColumn(Column);
+			UniformSlot->SetHorizontalAlignment(HAlign_Fill);
+			UniformSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+		else if (UGridSlot* GridSlot = Cast<UGridSlot>(ButtonWidget->Slot))
+		{
+			GridSlot->SetRow(Row);
+			GridSlot->SetColumn(Column);
+			GridSlot->SetHorizontalAlignment(HAlign_Fill);
+			GridSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		ButtonWidget->InitProgressItem(
+			ProgressItem,
+			OwnerData.ActorPtr);
+		ButtonWidget->SetRenderOpacity(
+			ProgressItem.State == ERTSTimedCommandState::Paused
+				? 0.65f
+				: 1.0f);
+		ButtonWidget->SetVisibility(ESlateVisibility::Visible);
+		UpdatedProgressButtons.Add(ButtonWidget);
+	}
+
+	for (URTSCommandButtonWidget* PreviousButton : ProgressButtonSlots)
+	{
+		if (!PreviousButton
+			|| UpdatedProgressButtons.Contains(PreviousButton))
+		{
+			continue;
+		}
+
+		PreviousButton->RemoveFromParent();
+		PreviousButton->SetVisibility(ESlateVisibility::Hidden);
+	}
+
+	ProgressButtonSlots = MoveTemp(UpdatedProgressButtons);
 }
 
 void URTSUnitPanelWidget::ShowGridContent(const FRTSSelectionView& View)
 {
+	HideGridSlots();
+	DisplayedSingleUnitData = FRTSUnitData();
 	const TArray<FRTSUnitData>& AllItems = View.Items;
 	const ERTSSelectionMode Mode = View.Mode;
 	const FString ActiveKey = View.ActiveGroupKey;
@@ -820,6 +1142,20 @@ void URTSUnitPanelWidget::ShowGridContent(const FRTSSelectionView& View)
 
 void URTSUnitPanelWidget::HideGridSlots()
 {
+	TArray<URTSCommandButtonWidget*> ButtonsToRestore =
+		MoveTemp(ProgressButtonSlots);
+	ProgressButtonSlots.Reset();
+	for (URTSCommandButtonWidget* ProgressButton : ButtonsToRestore)
+	{
+		if (!ProgressButton)
+		{
+			continue;
+		}
+
+		ProgressButton->RemoveFromParent();
+		ProgressButton->SetVisibility(ESlateVisibility::Hidden);
+	}
+
 	for (URTSUnitIconWidget* SlotWidget : IconSlots)
 	{
 		if (SlotWidget)
@@ -891,6 +1227,8 @@ void URTSUnitPanelWidget::RefreshSingleUnitDetail(const FRTSUnitData& Data)
 	SetOptionalDetailText(TEXT("AnnouncerText"), Data.AnnouncerId.ToString());
 	SetOptionalDetailText(TEXT("AnnouncerValue"), Data.AnnouncerId.ToString());
 
+	RefreshSingleUnitActivity(Data);
+
 	auto UpdateProgressBar = [](UProgressBar* Bar, float Current, float Max)
 	{
 		if (!Bar)
@@ -912,6 +1250,60 @@ void URTSUnitPanelWidget::RefreshSingleUnitDetail(const FRTSUnitData& Data)
 	UpdateProgressBar(Cast<UProgressBar>(FindDescendantWidgetByName(DetailRoot, TEXT("HealthBar"))), Data.Health, Data.MaxHealth);
 	UpdateProgressBar(Cast<UProgressBar>(FindDescendantWidgetByName(DetailRoot, TEXT("EnergyBar"))), Data.Energy, Data.MaxEnergy);
 	UpdateProgressBar(Cast<UProgressBar>(FindDescendantWidgetByName(DetailRoot, TEXT("ShieldBar"))), Data.Shield, Data.MaxShield);
+}
+
+void URTSUnitPanelWidget::RefreshSingleUnitActivity(const FRTSUnitData& Data)
+{
+	UWidget* DetailRoot = UnitDetailPane ? UnitDetailPane : Cast<UWidget>(this);
+	if (!DetailRoot)
+	{
+		return;
+	}
+
+	FString ActivityText;
+	if (Data.bHasProductionCapacity)
+	{
+		ActivityText = FString::Printf(TEXT("产能 %d/%d"),
+			Data.ProductionBusyLanes,
+			Data.ProductionTotalLanes);
+		if (Data.ProductionQueuedOrders > 0)
+		{
+			ActivityText += FString::Printf(TEXT("  等待 %d"), Data.ProductionQueuedOrders);
+		}
+	}
+	if (Data.bHasActivity)
+	{
+		if (!ActivityText.IsEmpty())
+		{
+			ActivityText += TEXT("  ·  ");
+		}
+		ActivityText += Data.ActivityLabel.ToString();
+		if (Data.ActivityRemainingSeconds > 0.0f)
+		{
+			ActivityText += FString::Printf(TEXT("  %.1fs"), Data.ActivityRemainingSeconds);
+		}
+		if (Data.ActivityQueueCount > 1)
+		{
+			ActivityText += FString::Printf(TEXT("  队列 %d"), Data.ActivityQueueCount);
+		}
+	}
+	if (UTextBlock* TextBlock = Cast<UTextBlock>(
+		FindDescendantWidgetByName(DetailRoot, TEXT("ActivityText"))))
+	{
+		TextBlock->SetText(FText::FromString(ActivityText));
+		TextBlock->SetVisibility(
+			ActivityText.TrimStartAndEnd().IsEmpty()
+				? ESlateVisibility::Collapsed
+				: ESlateVisibility::HitTestInvisible);
+	}
+	if (UProgressBar* ActivityBar = Cast<UProgressBar>(FindDescendantWidgetByName(DetailRoot, TEXT("ActivityBar"))))
+	{
+		ActivityBar->SetIsMarquee(false);
+		ActivityBar->SetPercent(FMath::Clamp(Data.ActivityProgress, 0.0f, 1.0f));
+		ActivityBar->SetVisibility(Data.bHasActivity
+			? ESlateVisibility::HitTestInvisible
+			: ESlateVisibility::Collapsed);
+	}
 }
 
 UWidget* URTSUnitPanelWidget::FindDescendantWidgetByName(UWidget* RootWidget, FName WidgetName) const

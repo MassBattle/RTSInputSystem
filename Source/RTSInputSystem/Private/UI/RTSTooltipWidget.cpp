@@ -15,7 +15,8 @@ void URTSTooltipWidget::NativeConstruct()
 {
     Super::NativeConstruct();
 
-    ApplyConfiguredStyle();
+	// RichTextBlock's Slate style instance exists only after construction.
+	ApplyConfiguredStyle();
 }
 
 void URTSTooltipWidget::ApplyConfiguredStyle()
@@ -113,5 +114,4 @@ void URTSTooltipWidget::SetTooltipContent(const FText& InTitle, const FText& InD
         }
     }
 
-    ApplyConfiguredStyle();
 }

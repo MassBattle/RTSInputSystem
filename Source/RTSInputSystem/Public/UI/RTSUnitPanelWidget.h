@@ -11,6 +11,7 @@ class UPanelWidget;
 class UBorder;
 class UTextBlock;
 class UWidget;
+class URTSCommandButtonWidget;
 class URTSUnitIconWidget;
 class UProgressBar;
 class SBox;
@@ -36,6 +37,11 @@ protected:
 	UFUNCTION()
 	void OnSelectionUpdated(const FRTSSelectionView& View);
 
+	UFUNCTION()
+	void OnControlGroupsUpdated(const FRTSControlGroupsView& View);
+
+	void OnCommandProgressChanged(AActor* ProgressProvider);
+
 	/**
 	* Class of the item widget to spawn in the list.
 	* Must be set in Blueprint (WBP_RTSUnitIcon).
@@ -52,6 +58,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Selection")
 	TSubclassOf<UUserWidget> CountWidgetClass;
 
+	/** Same button Blueprint used by the right-side command card. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Selection|Activity")
+	TSubclassOf<URTSCommandButtonWidget> CommandButtonWidgetClass;
+
 	// -- Bind Widgets --
 	
 	/**
@@ -64,6 +74,10 @@ protected:
 	/** Fixed square size for each selection panel cell. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Selection")
 	int32 IconSlotSize = 128;
+
+	/** Compact icon size used by training/research queue entries. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Selection|Activity")
+	int32 ActivityIconSlotSize = 88;
 
 	/** Fixed header reserve for formation/control-group information inside UnitPanel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Selection")
@@ -114,17 +128,26 @@ private:
 	UPROPERTY()
 	TArray<URTSUnitIconWidget*> IconSlots;
 
+	// Left-side activity buttons. They mirror command presentation but own their lifecycle.
+	UPROPERTY()
+	TArray<URTSCommandButtonWidget*> ProgressButtonSlots;
+
 	// Pool of re-usable count widgets (for Summary mode)
 	UPROPERTY()
 	TArray<UTextBlock*> CountSlots;
 
 	TSharedPtr<SBox> FixedPanelBoundsBox;
+	TWeakObjectPtr<AActor> DisplayedProgressProvider;
+	FRTSUnitData DisplayedSingleUnitData;
+	FDelegateHandle CommandProgressChangedHandle;
 
 	void RefreshGrid(const FRTSSelectionView& View);
 	void ShowEmptyContent();
 	void ShowSingleContent(const FRTSUnitData& Data);
 	void ShowGridContent(const FRTSSelectionView& View);
+	void ShowCommandProgressItems(const FRTSUnitData& OwnerData);
 	void RefreshSingleUnitDetail(const FRTSUnitData& Data);
+	void RefreshSingleUnitActivity(const FRTSUnitData& Data);
 	void HideGridSlots();
 	UWidget* FindDescendantWidgetByName(UWidget* RootWidget, FName WidgetName) const;
 };

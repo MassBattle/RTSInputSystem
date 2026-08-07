@@ -6,8 +6,11 @@
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Interfaces/RTSCommandInterface.h"
+#include "Interfaces/RTSCommandProgressController.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UI/RTSCommanderGridWidget.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
 
 void URTSCommandButtonWidget::NativeConstruct()
 {
@@ -16,11 +19,23 @@ void URTSCommandButtonWidget::NativeConstruct()
 	if (MainButton)
 	{
 		MainButton->OnClicked.AddUniqueDynamic(this, &URTSCommandButtonWidget::HandleClicked);
+		DefaultBackgroundColor = MainButton->GetBackgroundColor();
+		bHasDefaultBackgroundColor = true;
+		DefaultButtonStyle = MainButton->GetStyle();
+		bHasDefaultButtonStyle = true;
+		ApplyInteractionVisualState();
 	}
 }
 
 void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext, FKey InOverrideHotkey)
 {
+	bProgressItemMode = false;
+	bCanCancelProgressItem = false;
+	ProgressItemId = NAME_None;
+	ProgressActionTarget = nullptr;
+	ProgressQueueIndex = 0;
+	ProgressState = ERTSTimedCommandState::Active;
+	SetRenderOpacity(1.0f);
     ButtonData = InData;
     ContextActor = InContext;
 
@@ -28,28 +43,29 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
     {
         UE_LOG(LogTemp, Log, TEXT("Button Init: %s (Tag: %s)"), *ButtonData->DisplayName.ToString(), *ButtonData->CommandTag.ToString());
 
-        // Set Icon
+        // Icons own the button face when present. Text is only a temporary fallback for
+        // commands that do not have artwork yet; it must not cover finished icon buttons.
+        const bool bHasIcon = IsValid(ButtonData->Icon);
         if (IconImage)
         {
-            if (ButtonData->Icon)
-            {
-                IconImage->SetBrushFromTexture(ButtonData->Icon);
-            }
-            IconImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+            IconImage->SetBrushFromTexture(ButtonData->Icon);
+            IconImage->SetVisibility(bHasIcon
+                ? ESlateVisibility::HitTestInvisible
+                : ESlateVisibility::Collapsed);
         }
 
         if (DisplayNameText)
         {
             DisplayNameText->SetText(ButtonData->DisplayName);
-            DisplayNameText->SetVisibility(ButtonData->DisplayName.IsEmpty()
-                ? ESlateVisibility::Collapsed
-                : ESlateVisibility::HitTestInvisible);
+            DisplayNameText->SetVisibility(!bHasIcon && !ButtonData->DisplayName.IsEmpty()
+                ? ESlateVisibility::HitTestInvisible
+                : ESlateVisibility::Collapsed);
         }
 
         // Set Hotkey Display
         if (HotkeyText)
         {
-            FKey TargetKey = InOverrideHotkey.IsValid() ? InOverrideHotkey : ButtonData->Hotkey;
+			const FKey TargetKey = InOverrideHotkey.IsValid() ? InOverrideHotkey : ButtonData->Hotkey;
             
             // Check if key is valid
             if (!TargetKey.IsValid())
@@ -65,6 +81,8 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
 
         // Reset State
         bIsCooldownActive = false;
+		bCommandActive = false;
+		KeyboardPressFeedbackRemaining = 0.0f;
         if (CooldownImage)
         {
             CooldownImage->SetVisibility(ESlateVisibility::Hidden);
@@ -78,9 +96,20 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
         {
             AutoCastBorder->SetVisibility(ESlateVisibility::Hidden);
         }
+		if (QueueCountText)
+		{
+			QueueCountText->SetVisibility(ESlateVisibility::Collapsed);
+		}
+		if (ActivityProgressBar)
+		{
+			ActivityProgressBar->SetIsMarquee(false);
+			ActivityProgressBar->SetPercent(0.0f);
+			ActivityProgressBar->SetVisibility(ESlateVisibility::Collapsed);
+		}
 
         SetIsDisabled(false);
         SetVisibility(ESlateVisibility::Visible);
+		ApplyInteractionVisualState();
         
         // Remove Standard Tooltip to allow shared logic
         if (MainButton)
@@ -96,8 +125,99 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
     {
         // Null data means empty slot
         if (MainButton) MainButton->SetToolTip(nullptr);
+		bCommandActive = false;
+		KeyboardPressFeedbackRemaining = 0.0f;
+		ApplyInteractionVisualState();
         SetVisibility(ESlateVisibility::Hidden);
     }
+}
+
+void URTSCommandButtonWidget::InitProgressItem(
+	const FRTSTimedCommandInstance& ProgressItem,
+	AActor* InContext)
+{
+	URTSCommandButton* Presentation = ProgressItem.CommandButton;
+	if (!Presentation)
+	{
+		if (!TransientProgressButtonData)
+		{
+			TransientProgressButtonData =
+				NewObject<URTSCommandButton>(this, TEXT("ProgressButtonPresentation"));
+		}
+		TransientProgressButtonData->CommandTag = ProgressItem.CommandTag;
+		TransientProgressButtonData->DisplayName =
+			!ProgressItem.DisplayName.IsEmpty()
+				? ProgressItem.DisplayName
+				: ProgressItem.PayloadId.IsNone()
+				? FText::FromName(ProgressItem.CommandTag.GetTagName())
+				: FText::FromName(ProgressItem.PayloadId);
+		TransientProgressButtonData->Icon = ProgressItem.Icon;
+		Presentation = TransientProgressButtonData;
+	}
+
+	const bool bPresentationChanged =
+		ButtonData != Presentation;
+	if (bPresentationChanged)
+	{
+		Init(Presentation, InContext, FKey());
+	}
+
+	// The widget is the exact command-card button moved into the activity area.
+	// None of the command-card-only interaction state may travel with it: otherwise
+	// Hovered/Pressed materials become its persistent Normal face and queued items
+	// look like several simultaneous active researches.
+	bCommandActive = false;
+	KeyboardPressFeedbackRemaining = 0.0f;
+	bIsCooldownActive = false;
+	SetRenderOpacity(1.0f);
+	if (CooldownImage)
+	{
+		CooldownImage->SetVisibility(ESlateVisibility::Hidden);
+	}
+	if (AutoCastBorder)
+	{
+		AutoCastBorder->SetVisibility(ESlateVisibility::Hidden);
+	}
+	ApplyInteractionVisualState();
+
+	bProgressItemMode = true;
+	bCanCancelProgressItem = ProgressItem.bCanCancel;
+	ProgressItemId = ProgressItem.InstanceId.IsValid()
+		? FName(*ProgressItem.InstanceId.ToString(EGuidFormats::Digits))
+		: NAME_None;
+	ProgressActionTarget = ProgressItem.Controller
+		? ProgressItem.Controller
+		: InContext;
+	ProgressQueueIndex = ProgressItem.QueueIndex;
+	ProgressState = ProgressItem.State;
+
+	if (HotkeyText)
+	{
+		HotkeyText->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	if (ActivityProgressBar)
+	{
+		ActivityProgressBar->SetIsMarquee(false);
+		ActivityProgressBar->SetPercent(ProgressItem.GetProgress01());
+		ActivityProgressBar->SetVisibility(
+			ProgressItem.State == ERTSTimedCommandState::Queued
+				? ESlateVisibility::Collapsed
+				: ESlateVisibility::HitTestInvisible);
+	}
+	if (QueueCountText)
+	{
+		if (ProgressItem.State == ERTSTimedCommandState::Queued)
+		{
+			QueueCountText->SetText(FText::AsNumber(ProgressItem.QueueIndex));
+			QueueCountText->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+		else
+		{
+			QueueCountText->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	SetIsDisabled(!bCanCancelProgressItem);
+	SetVisibility(ESlateVisibility::Visible);
 }
 
 void URTSCommandButtonWidget::HandleHovered()
@@ -123,9 +243,12 @@ void URTSCommandButtonWidget::HandleUnhovered()
     }
 }
 
-void URTSCommandButtonWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+void URTSCommandButtonWidget::RefreshCommandState()
 {
-Super::NativeTick(MyGeometry, InDeltaTime);
+if (bProgressItemMode)
+{
+	return;
+}
 
 // Update Availability, Cooldown & AutoCast State from Context
 if (ButtonData && ContextActor.IsValid() && ContextActor->Implements<URTSCommandInterface>())
@@ -199,6 +322,15 @@ else if (ButtonData && ButtonData->bAllowAutoCast && AutoCastBorder)
     const bool bEnabled = ButtonData->IsAutoCastEnabledForContext(this, nullptr);
     AutoCastBorder->SetVisibility(bEnabled ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
 }
+
+if (ButtonData && QueueCountText)
+{
+	const int32 QueueCount = ButtonData->GetQueueCountForContext(this, ContextActor.Get());
+	QueueCountText->SetText(FText::AsNumber(QueueCount));
+	QueueCountText->SetVisibility(QueueCount > 0
+		? ESlateVisibility::HitTestInvisible
+		: ESlateVisibility::Collapsed);
+}
 }
 
 FReply URTSCommandButtonWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
@@ -232,8 +364,93 @@ void URTSCommandButtonWidget::SetIsDisabled(bool bDisabled)
 	}
 }
 
+void URTSCommandButtonWidget::SetCommandActive(bool bActive)
+{
+	if (bCommandActive == bActive)
+	{
+		return;
+	}
+
+	bCommandActive = bActive;
+	ApplyInteractionVisualState();
+}
+
+void URTSCommandButtonWidget::PlayKeyboardPressFeedback()
+{
+	KeyboardPressFeedbackRemaining = FMath::Max(0.05f, KeyboardPressFeedbackDuration);
+	ApplyInteractionVisualState();
+
+	if (UWorld* World = GetWorld())
+	{
+		FTimerHandle FeedbackTimer;
+		const TWeakObjectPtr<URTSCommandButtonWidget> WeakThis(this);
+		World->GetTimerManager().SetTimer(
+			FeedbackTimer,
+			[WeakThis]()
+			{
+				if (URTSCommandButtonWidget* Button = WeakThis.Get())
+				{
+					Button->KeyboardPressFeedbackRemaining = 0.0f;
+					Button->ApplyInteractionVisualState();
+				}
+			},
+			KeyboardPressFeedbackRemaining,
+			false);
+	}
+}
+
+void URTSCommandButtonWidget::ApplyInteractionVisualState()
+{
+	if (!MainButton)
+	{
+		return;
+	}
+
+	if (!bHasDefaultBackgroundColor)
+	{
+		DefaultBackgroundColor = MainButton->GetBackgroundColor();
+		bHasDefaultBackgroundColor = true;
+	}
+	if (!bHasDefaultButtonStyle)
+	{
+		DefaultButtonStyle = MainButton->GetStyle();
+		bHasDefaultButtonStyle = true;
+	}
+
+	FButtonStyle VisualStyle = DefaultButtonStyle;
+	if (KeyboardPressFeedbackRemaining > 0.0f)
+	{
+		VisualStyle.SetNormal(DefaultButtonStyle.Pressed);
+		VisualStyle.SetHovered(DefaultButtonStyle.Pressed);
+	}
+	else if (bCommandActive)
+	{
+		VisualStyle.SetNormal(DefaultButtonStyle.Hovered);
+	}
+	MainButton->SetStyle(VisualStyle);
+
+	const FLinearColor Tint = KeyboardPressFeedbackRemaining > 0.0f
+		? KeyboardPressedTint
+		: (bCommandActive ? ActiveCommandTint : FLinearColor::White);
+	MainButton->SetBackgroundColor(DefaultBackgroundColor * Tint);
+}
+
 void URTSCommandButtonWidget::HandleClicked()
 {
+	if (bProgressItemMode)
+	{
+		if (bCanCancelProgressItem
+			&& ProgressActionTarget
+			&& ProgressActionTarget->Implements<URTSCommandProgressController>())
+		{
+			IRTSCommandProgressController::
+				Execute_RequestCancelCommandProgressItem(
+					ProgressActionTarget,
+					ProgressItemId);
+		}
+		return;
+	}
+
 	if (ButtonData)
 	{
         UE_LOG(LogTemp, Verbose, TEXT("RTSCommandButtonWidget: Clicked %s"), *ButtonData->CommandTag.ToString());

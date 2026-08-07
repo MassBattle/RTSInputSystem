@@ -13,8 +13,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMinimapWorldLocation, const FVect
 /**
  * URTSMinimapJumpWidget
  *
- * 覆盖在小地图之上的自包含透明跳转控件。
- * 负责提供可命中的透明 surface、渲染相机视锥体，并把点击/拖动转换为世界坐标跳转请求。
+ * 覆盖在小地图之上的自包含透明交互控件。
+ * 负责提供可命中的透明 surface、渲染相机视锥体，并把左键转换为相机跳转、右键转换为移动命令。
  */
 UCLASS(BlueprintType, Blueprintable, meta=(DisplayName="RTS Minimap Jump Widget"))
 class RTSINPUTSYSTEM_API URTSMinimapJumpWidget : public UUserWidget
@@ -26,6 +26,13 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Minimap|Jump")
 	void InitializeJumpWidget();
+
+	/**
+	 * Confirms the selector's active targeted command when ScreenPosition is
+	 * inside this minimap. Returns true when the pointer belongs to this widget,
+	 * even if that target type cannot be resolved from a minimap coordinate.
+	 */
+	bool HandlePendingTargetConfirmationAtScreenPosition(const FVector2D& ScreenPosition);
 
 protected:
 	virtual void NativeConstruct() override;
@@ -53,6 +60,10 @@ private:
 	UActorComponent* FindRTSCameraJumpComponent() const;
 	bool TryJumpToWorldLocation(const FVector& WorldLocation);
 	void RequestWorldLocation(const FVector2D& WorldPos);
+	FVector ResolveCommandWorldLocation(const FVector2D& WorldPos) const;
+	bool TryCommitPendingCommand(const FVector& WorldLocation) const;
+	bool TryIssueMoveCommand(const FVector& WorldLocation) const;
+	void RequestMoveCommand(const FVector2D& WorldPos);
 	void LoadMapRegionBounds();
 
 protected:

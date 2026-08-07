@@ -1,18 +1,31 @@
 #include "RTSSelectionSubsystem.h"
+#include "GenericTeamAgentInterface.h"
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
+#include "Interfaces/RTSCommandProgressProvider.h"
 #include "RTSInputPanelSettings.h"
 #include "RTSSelectable.h"
 #include "RTSCommandSubsystem.h"
 #include "MassEntitySubsystem.h"
 #include "MassEntityManager.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "TimerManager.h"
 #include "GameFramework/Actor.h"
 #include "Interfaces/RTSCommandInterface.h"
 #include "Data/RTSCommandGridAsset.h"
 #include "Data/RTSCommandButton.h"
+#include "Data/RTSCmd_SubMenu.h"
+#include "Commands/RTSCityCommands.h"
 #include "Commands/RTSUnitCommands.h"
 #include "Components/MassBattleAgentComponent.h"
 #include "Fragments/Health.h"
+#include "Fragments/Network.h"
 #include "Fragments/SubType.h"
+#include "Fragments/Team.h"
+#include "Fragments/Transform.h"
+#include "MassAPIFuncLib.h"
 #include "Tasks/MassBattleBPTaskAgentsMoveTo.h"
 #include "Tasks/MassBattleBPTaskAgentsChaseAttack.h"
 #include "Interfaces/MassBattleAgentInterface.h"
@@ -20,12 +33,151 @@
 #include "HAL/FileManager.h"
 #include "ImageUtils.h"
 #include "Misc/Paths.h"
+#include "Algo/AllOf.h"
 
 DEFINE_LOG_CATEGORY(LogORTSSelection);
+
+void URTSSelectionSubsystem::RequestCommandRefresh()
+{
+	if (bCommandRefreshPending)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OnCommandRefreshRequested.Broadcast();
+		return;
+	}
+
+	bCommandRefreshPending = true;
+	const TWeakObjectPtr<URTSSelectionSubsystem> WeakThis(this);
+	World->GetTimerManager().SetTimerForNextTick(
+		[WeakThis]()
+		{
+			if (URTSSelectionSubsystem* Selection = WeakThis.Get())
+			{
+				Selection->bCommandRefreshPending = false;
+				Selection->OnCommandRefreshRequested.Broadcast();
+			}
+		});
+}
+
+void URTSSelectionSubsystem::NotifyCommandProgressChanged(
+	AActor* ProgressProvider)
+{
+	if (!ProgressProvider)
+	{
+		return;
+	}
+
+	PendingCommandProgressProviders.AddUnique(ProgressProvider);
+	if (bCommandProgressNotificationPending)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		TArray<TWeakObjectPtr<AActor>> ProgressProviders =
+			MoveTemp(PendingCommandProgressProviders);
+		for (const TWeakObjectPtr<AActor>& Provider : ProgressProviders)
+		{
+			if (Provider.IsValid())
+			{
+				OnCommandProgressChanged.Broadcast(Provider.Get());
+			}
+		}
+		return;
+	}
+
+	bCommandProgressNotificationPending = true;
+	const TWeakObjectPtr<URTSSelectionSubsystem> WeakThis(this);
+	World->GetTimerManager().SetTimerForNextTick(
+		[WeakThis]()
+		{
+			URTSSelectionSubsystem* Selection = WeakThis.Get();
+			if (!Selection)
+			{
+				return;
+			}
+
+			Selection->bCommandProgressNotificationPending = false;
+			TArray<TWeakObjectPtr<AActor>> ProgressProviders =
+				MoveTemp(Selection->PendingCommandProgressProviders);
+			for (const TWeakObjectPtr<AActor>& Provider : ProgressProviders)
+			{
+				if (Provider.IsValid())
+				{
+					Selection->OnCommandProgressChanged.Broadcast(
+						Provider.Get());
+				}
+			}
+		});
+}
 
 namespace
 {
 	constexpr int32 MaxSynchronousFormationEntities = 512;
+	constexpr int32 MaxControlGroupFocusSamples = 32;
+	constexpr float ControlGroupFocusRetainedFraction = 0.60f;
+	constexpr int32 MinControlGroupIndex = 0;
+	constexpr int32 MaxControlGroupIndex = 9;
+
+	const int32 ControlGroupDisplayOrder[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
+
+	void AddSelectionTag(FGameplayTagContainer& Tags, const TCHAR* TagName)
+	{
+		const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(TagName), false);
+		if (Tag.IsValid())
+		{
+			Tags.AddTag(Tag);
+		}
+	}
+
+	bool ContainsAny(const FString& SearchText, std::initializer_list<const TCHAR*> Terms)
+	{
+		for (const TCHAR* Term : Terms)
+		{
+			if (SearchText.Contains(Term))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool MatchesRequiredSelectionTag(
+		const FRTSSelectionQuery& Query,
+		const FGameplayTagContainer& SelectionTags)
+	{
+		if (Query.ExcludedSelectionTag.IsValid()
+			&& SelectionTags.HasTag(Query.ExcludedSelectionTag))
+		{
+			return false;
+		}
+
+		const FGameplayTag& RequiredSelectionTag = Query.RequiredSelectionTag;
+		if (!RequiredSelectionTag.IsValid())
+		{
+			return true;
+		}
+
+		if (!SelectionTags.HasTag(RequiredSelectionTag))
+		{
+			return false;
+		}
+
+		const FGameplayTag ArmyRootTag = FGameplayTag::RequestGameplayTag(
+			FName(TEXT("RTS.Selection.Army")), false);
+		const FGameplayTag StructureRootTag = FGameplayTag::RequestGameplayTag(
+			FName(TEXT("RTS.Selection.Structure")), false);
+		const bool bArmyQuery = ArmyRootTag.IsValid() && RequiredSelectionTag.MatchesTag(ArmyRootTag);
+		const bool bStructure = StructureRootTag.IsValid() && SelectionTags.HasTag(StructureRootTag);
+		return !bArmyQuery || !bStructure;
+	}
 
 	FString GetActorGroupKey(const AActor* Actor)
 	{
@@ -88,6 +240,32 @@ namespace
 		}
 
 		return nullptr;
+	}
+
+	const FRTSMassUnitTypeProtocol* FindMassUnitTypeProtocolForEntity(
+		const URTSInputPanelSettings* Settings,
+		const FMassEntityManager& EntityManager,
+		const FMassEntityHandle Entity,
+		const int32 SubTypeIndex)
+	{
+		const FNetworking* Networking = EntityManager.GetFragmentDataPtr<FNetworking>(Entity);
+		return RTSUnitTypeProtocol::FindByNetworkKeyOrSubType(
+			Settings,
+			Networking ? Networking->Key : NAME_None,
+			SubTypeIndex);
+	}
+
+	const FRTSCommandLoadoutDefinition* FindCommandLoadoutById(const URTSInputPanelSettings* Settings, FName LoadoutId)
+	{
+		if (!Settings || LoadoutId.IsNone())
+		{
+			return nullptr;
+		}
+
+		return Settings->CommandLoadouts.FindByPredicate([LoadoutId](const FRTSCommandLoadoutDefinition& Loadout)
+		{
+			return Loadout.LoadoutId == LoadoutId;
+		});
 	}
 
 	const FRTSMassUnitTypeProtocol* FindMassUnitTypeProtocolByKey(const URTSInputPanelSettings* Settings, const FString& TypeKey, int32& OutSubTypeIndex)
@@ -364,11 +542,7 @@ namespace
 
 	UTexture2D* LoadDefaultUnitAvatarBySeed(uint32 Seed)
 	{
-		if (UTexture2D* UnitIcon = LoadDefaultUnitPanelIconBySeed(Seed))
-		{
-			return UnitIcon;
-		}
-
+		(void)Seed;
 		return LoadDefaultUnitAvatar();
 	}
 
@@ -477,6 +651,21 @@ namespace
 		return ERTSCommandTargetType::Instant;
 	}
 
+	bool IsComposableContextCommand(const FGameplayTag& CommandTag)
+	{
+		const FName TagName = CommandTag.GetTagName();
+		return TagName == FName(TEXT("RTS.Command.Move"))
+			|| TagName == FName(TEXT("RTS.Command.Attack"))
+			|| TagName == FName(TEXT("RTS.Command.Patrol"));
+	}
+
+	bool ClearsTaskVisualization(const FGameplayTag& CommandTag)
+	{
+		const FName TagName = CommandTag.GetTagName();
+		return TagName == FName(TEXT("RTS.Command.Stop"))
+			|| TagName == FName(TEXT("RTS.Command.Hold"));
+	}
+
 	URTSCommandButton* CreateDefaultCommandButtonForTag(UObject* Outer, const FGameplayTag& CommandTag)
 	{
 		const FName TagName = CommandTag.GetTagName();
@@ -499,6 +688,88 @@ namespace
 		if (TagName == FName(TEXT("RTS.Command.Patrol")))
 		{
 			return NewObject<URTSCmd_Patrol>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Factory")))
+		{
+			return NewObject<URTSCmd_BuildFactory>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.University")))
+		{
+			return NewObject<URTSCmd_BuildUniversity>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Airfield")))
+		{
+			return NewObject<URTSCmd_BuildAirfield>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Shipyard")))
+		{
+			return NewObject<URTSCmd_BuildShipyard>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.ResearchCenter")))
+		{
+			return NewObject<URTSCmd_BuildResearchCenter>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.IndustrialPark")))
+		{
+			return NewObject<URTSCmd_BuildIndustrialPark>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Refinery")))
+		{
+			return NewObject<URTSCmd_BuildRefinery>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Barracks")))
+		{
+			return NewObject<URTSCmd_BuildBarracks>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.TankFactory")))
+		{
+			URTSCommandButton* Button = NewObject<URTSCommandButton>(Outer);
+			Button->CommandTag = CommandTag;
+			Button->TargetType = ERTSCommandTargetType::Location;
+			Button->DisplayName = FText::FromString(TEXT("建造坦克工厂"));
+			Button->Description = FText::FromString(TEXT("选择网格后，系统指派最近的空闲同队军官建造4×4格坦克工厂；该建筑生产本国的装甲单位实现。按住Shift可追加并行施工命令。"));
+			Button->PreferredIndex = 1;
+			Button->LowValueCost = 400;
+			Button->HighValueCost = 100;
+			Button->PlacementFootprintCells = FIntPoint(4, 4);
+			return Button;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.VehicleFactory")))
+		{
+			URTSCommandButton* Button = NewObject<URTSCommandButton>(Outer);
+			Button->CommandTag = CommandTag;
+			Button->TargetType = ERTSCommandTargetType::Location;
+			Button->DisplayName = FText::FromString(TEXT("建造战车工厂"));
+			Button->Description = FText::FromString(TEXT("选择网格后，系统指派最近的空闲同队军官建造4×4格战车工厂；该建筑生产防空、反坦克炮、自行火炮与支援车辆。按住Shift可追加并行施工命令。"));
+			Button->PreferredIndex = 2;
+			Button->LowValueCost = 360;
+			Button->HighValueCost = 80;
+			Button->PlacementFootprintCells = FIntPoint(4, 4);
+			return Button;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.Defense")))
+		{
+			return NewObject<URTSCmd_BuildDefense>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.FieldCover")))
+		{
+			return NewObject<URTSCmd_BuildFieldCover>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.MachineGunBunker")))
+		{
+			return NewObject<URTSCmd_BuildMachineGunBunker>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.AntiTankBunker")))
+		{
+			return NewObject<URTSCmd_BuildAntiTankBunker>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.AntiTankObstacle")))
+		{
+			return NewObject<URTSCmd_BuildAntiTankObstacle>(Outer);
+		}
+		if (TagName == FName(TEXT("RTS.Command.Build.BarbedWire")))
+		{
+			return NewObject<URTSCmd_BuildBarbedWire>(Outer);
 		}
 
 		URTSCommandButton* Button = NewObject<URTSCommandButton>(Outer);
@@ -523,10 +794,62 @@ namespace
 		}
 
 		Grid->Buttons.Add(NewObject<URTSCmd_Move>(Grid));
-		Grid->Buttons.Add(NewObject<URTSCmd_Attack>(Grid));
 		Grid->Buttons.Add(NewObject<URTSCmd_Stop>(Grid));
 		Grid->Buttons.Add(NewObject<URTSCmd_HoldPosition>(Grid));
 		Grid->Buttons.Add(NewObject<URTSCmd_Patrol>(Grid));
+		Grid->Buttons.Add(NewObject<URTSCmd_Attack>(Grid));
+	}
+
+	bool ResolveCoreCommandPresentation(
+		const FGameplayTag& CommandTag,
+		int32& OutSlotIndex,
+		FKey& OutHotkey)
+	{
+		const FName TagName = CommandTag.GetTagName();
+		if (TagName == FName(TEXT("RTS.Command.Move")))
+		{
+			OutSlotIndex = 0;
+			OutHotkey = EKeys::Q;
+			return true;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Stop")))
+		{
+			OutSlotIndex = 1;
+			OutHotkey = EKeys::W;
+			return true;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Hold")))
+		{
+			OutSlotIndex = 2;
+			OutHotkey = EKeys::E;
+			return true;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Patrol")))
+		{
+			OutSlotIndex = 3;
+			OutHotkey = EKeys::R;
+			return true;
+		}
+		if (TagName == FName(TEXT("RTS.Command.Attack")))
+		{
+			OutSlotIndex = 4;
+			OutHotkey = EKeys::T;
+			return true;
+		}
+		return false;
+	}
+
+	int32 ResolveCommandSlotIndex(
+		const FGameplayTag& CommandTag,
+		const int32 ConfiguredSlotIndex)
+	{
+		int32 CanonicalSlotIndex = ConfiguredSlotIndex;
+		FKey CanonicalHotkey;
+		ResolveCoreCommandPresentation(
+			CommandTag,
+			CanonicalSlotIndex,
+			CanonicalHotkey);
+		return CanonicalSlotIndex;
 	}
 
 	void RemoveCommandAtSlot(URTSCommandGridAsset* Grid, int32 SlotIndex)
@@ -542,6 +865,53 @@ namespace
 		});
 	}
 
+	void ApplyBuiltInDefenseGridLayout(URTSCommandGridAsset* Grid)
+	{
+		if (!Grid)
+		{
+			return;
+		}
+
+		for (URTSCommandButton* Button : Grid->GetAllButtons())
+		{
+			if (!Button)
+			{
+				continue;
+			}
+
+			const FName CommandName = Button->CommandTag.GetTagName();
+			if (CommandName == FName(TEXT("RTS.Command.Build.FieldCover")))
+			{
+				Button->PreferredIndex = 0;
+				Button->DisplayName = FText::FromString(TEXT("沙袋堑壕"));
+				Button->Hotkey = EKeys::Q;
+			}
+			else if (CommandName == FName(TEXT("RTS.Command.Build.MachineGunBunker")))
+			{
+				Button->PreferredIndex = 1;
+				Button->DisplayName = FText::FromString(TEXT("机枪碉堡"));
+				Button->Hotkey = EKeys::W;
+			}
+			else if (CommandName == FName(TEXT("RTS.Command.Build.AntiTankBunker")))
+			{
+				Button->PreferredIndex = 2;
+				Button->DisplayName = FText::FromString(TEXT("反坦克碉堡"));
+				Button->Hotkey = EKeys::E;
+			}
+			else if (CommandName == FName(TEXT("RTS.Command.Build.AntiTankObstacle")))
+			{
+				Button->PreferredIndex = 10;
+				Button->DisplayName = FText::FromString(TEXT("反坦克陷阱"));
+				Button->Hotkey = EKeys::Z;
+			}
+			else if (CommandName == FName(TEXT("RTS.Command.Build.BarbedWire")))
+			{
+				Button->PreferredIndex = 11;
+				Button->Hotkey = EKeys::X;
+			}
+		}
+	}
+
 	void ApplyCommandSlotPresentation(URTSCommandButton* Button, const FRTSMassUnitCommandSlotDefinition& Slot, const FGameplayTag& CommandTag)
 	{
 		if (!Button)
@@ -551,7 +921,15 @@ namespace
 
 		Button->CommandTag = CommandTag;
 		Button->TargetType = ResolveCommandSlotTargetType(Slot, CommandTag);
-		Button->PreferredIndex = Slot.SlotIndex;
+		int32 PresentationSlotIndex = Slot.SlotIndex;
+		FKey PresentationHotkey = Slot.Hotkey.IsNone()
+			? Button->Hotkey
+			: FKey(Slot.Hotkey);
+		const bool bCoreCommand = ResolveCoreCommandPresentation(
+			CommandTag,
+			PresentationSlotIndex,
+			PresentationHotkey);
+		Button->PreferredIndex = PresentationSlotIndex;
 		Button->bHideIfUnavailable = Slot.bHideIfUnavailable;
 
 		if (!Slot.DisplayName.TrimStartAndEnd().IsEmpty())
@@ -564,9 +942,9 @@ namespace
 			Button->Description = FText::FromString(Slot.Description);
 		}
 
-		if (!Slot.Hotkey.IsNone())
+		if (bCoreCommand || !Slot.Hotkey.IsNone())
 		{
-			Button->Hotkey = FKey(Slot.Hotkey);
+			Button->Hotkey = PresentationHotkey;
 		}
 
 		if (UTexture2D* SlotIcon = LoadConfiguredTexture(Slot.Icon))
@@ -594,12 +972,17 @@ void URTSSelectionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void URTSSelectionSubsystem::Deinitialize()
 {
+	OnCommandFeedbackIssued.Clear();
+	ControlGroups.Reset();
+	MassProtocolGridCache.Reset();
+	ActiveControlGroupIndex = INDEX_NONE;
+	PreferredActiveControlGroupIndex = INDEX_NONE;
 	Super::Deinitialize();
 }
 
 FString URTSSelectionSubsystem::GetMassSubtypeDisplayName(int32 SubTypeIndex) const
 {
-	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const URTSInputPanelSettings* Settings = RTSUnitTypeProtocol::GetSettings();
 	if (const FRTSMassUnitTypeProtocol* Protocol = FindMassUnitTypeProtocolByIndex(Settings, SubTypeIndex))
 	{
 		const FString ProtocolName = Protocol->DisplayName.TrimStartAndEnd();
@@ -664,7 +1047,7 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
 
 	for (AActor* Actor : InActors)
 	{
-		if (IsValid(Actor))
+		if (IsValid(Actor) && IsActorControllable(Actor))
 		{
 			FinalActors.AddUnique(Actor);
 		}
@@ -672,7 +1055,7 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
 
 	for (const FEntityHandle& Handle : InEntities)
 	{
-		if (Handle.Index != 0)
+		if (IsEntityControllable(Handle))
 		{
 			FinalEntities.AddUnique(Handle);
 		}
@@ -687,7 +1070,7 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
             if (UMassBattleAgentComponent* MassAgent = Actor->FindComponentByClass<UMassBattleAgentComponent>())
             {
                 FEntityHandle ProxiedEntity = MassAgent->GetEntityHandle();
-                if (ProxiedEntity.Index != 0)
+                if (IsEntityControllable(ProxiedEntity))
                 {
                     FinalEntities.AddUnique(ProxiedEntity);
                     FinalActors.RemoveAt(i);
@@ -731,11 +1114,112 @@ void URTSSelectionSubsystem::SetSelectedUnits(const TArray<AActor*>& InActors, c
 		}
 	}
 
+	// A changed selection has no explicit Tab priority yet. BuildSelectionView
+	// chooses the most numerous unit-type group as the new default.
+	CurrentGroupIndex = INDEX_NONE;
 	const FRTSSelectionView View = BuildSelectionView();
+	UpdateActiveControlGroupIndex();
 	BroadcastSelectionViewAndGrid(View);
+	BroadcastControlGroupsView();
 
     UE_LOG(LogORTSSelection, Log, TEXT("Selection: Modifier=%d Actors=%d Entities=%d ActiveKey=%s"),
         (int32)Modifier, SelectedActors.Num(), SelectedEntities.Num(), *View.ActiveGroupKey);
+}
+
+int32 URTSSelectionSubsystem::GetPlayerTeamIndex() const
+{
+	const ULocalPlayer* LocalPlayer = GetLocalPlayer();
+	const APlayerController* PlayerController = LocalPlayer
+		? LocalPlayer->GetPlayerController(GetWorld())
+		: nullptr;
+	const APlayerState* PlayerState = PlayerController
+		? PlayerController->GetPlayerState<APlayerState>()
+		: nullptr;
+	const IGenericTeamAgentInterface* TeamProvider =
+		Cast<IGenericTeamAgentInterface>(PlayerState);
+	if (!TeamProvider)
+	{
+		return INDEX_NONE;
+	}
+
+	const uint8 TeamId = TeamProvider->GetGenericTeamId().GetId();
+	return TeamId == FGenericTeamId::NoTeam.GetId()
+		? INDEX_NONE
+		: static_cast<int32>(TeamId);
+}
+
+bool URTSSelectionSubsystem::IsEntityControllable(const FEntityHandle& Handle) const
+{
+	if (Handle.Index == 0)
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	UMassEntitySubsystem* MassSubsystem = World ? World->GetSubsystem<UMassEntitySubsystem>() : nullptr;
+	if (!MassSubsystem)
+	{
+		return false;
+	}
+
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+	const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
+	if (!EntityManager.IsEntityActive(NativeHandle))
+	{
+		return false;
+	}
+
+	const int32 PlayerTeamIndex = GetPlayerTeamIndex();
+	if (PlayerTeamIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const FTeam* Team = EntityManager.GetFragmentDataPtr<FTeam>(NativeHandle);
+	return Team && Team->index == PlayerTeamIndex;
+}
+
+bool URTSSelectionSubsystem::IsActorControllable(const AActor* Actor) const
+{
+	if (!IsValid(Actor))
+	{
+		return false;
+	}
+
+	const int32 PlayerTeamIndex = GetPlayerTeamIndex();
+	if (PlayerTeamIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	if (const UMassBattleAgentComponent* MassAgent = Actor->FindComponentByClass<UMassBattleAgentComponent>())
+	{
+		const FEntityHandle Handle = MassAgent->GetEntityHandle();
+		return Handle.Index != 0
+			? IsEntityControllable(Handle)
+			: MassAgent->TeamIndex == PlayerTeamIndex;
+	}
+
+	if (const URTSSelectable* Selectable = Actor->FindComponentByClass<URTSSelectable>())
+	{
+		return Selectable->TeamIndex == PlayerTeamIndex;
+	}
+
+	return false;
+}
+
+TArray<FEntityHandle> URTSSelectionSubsystem::GetControllableSelectedEntities() const
+{
+	TArray<FEntityHandle> Result;
+	Result.Reserve(SelectedEntities.Num());
+	for (const FEntityHandle& Handle : SelectedEntities)
+	{
+		if (IsEntityControllable(Handle))
+		{
+			Result.Add(Handle);
+		}
+	}
+	return Result;
 }
 
 FRTSSelectionView URTSSelectionSubsystem::BuildSelectionView()
@@ -800,22 +1284,49 @@ FRTSSelectionView URTSSelectionSubsystem::BuildSelectionView()
 		: FString();
 
 	AvailableGroupKeys.Reset();
+	TMap<FString, int32> GroupCounts;
 	for (const auto& Item : View.Items)
 	{
-		AvailableGroupKeys.AddUnique(GetSelectionUnitGroupKey(Item));
+		const FString GroupKey = GetSelectionUnitGroupKey(Item);
+		AvailableGroupKeys.AddUnique(GroupKey);
+		GroupCounts.FindOrAdd(GroupKey) += FMath::Max(1, Item.Count);
 	}
 	AvailableGroupKeys.Sort();
 
+	bool bPreservedActiveGroup = false;
 	if (!PreviousActiveKey.IsEmpty())
 	{
 		const int32 PreservedIndex = AvailableGroupKeys.IndexOfByKey(PreviousActiveKey);
 		if (PreservedIndex != INDEX_NONE)
 		{
 			CurrentGroupIndex = PreservedIndex;
+			bPreservedActiveGroup = true;
 		}
 	}
 
-	if (CurrentGroupIndex >= AvailableGroupKeys.Num() || CurrentGroupIndex < 0) CurrentGroupIndex = 0;
+	if (AvailableGroupKeys.IsEmpty())
+	{
+		CurrentGroupIndex = INDEX_NONE;
+		return View;
+	}
+
+	if (!bPreservedActiveGroup)
+	{
+		int32 LargestGroupCount = INDEX_NONE;
+		FString LargestGroupKey;
+		for (const FString& GroupKey : AvailableGroupKeys)
+		{
+			const int32 GroupCount = GroupCounts.FindRef(GroupKey);
+			// AvailableGroupKeys is sorted, so equal counts keep a deterministic key.
+			if (GroupCount > LargestGroupCount)
+			{
+				LargestGroupCount = GroupCount;
+				LargestGroupKey = GroupKey;
+			}
+		}
+		CurrentGroupIndex = AvailableGroupKeys.IndexOfByKey(LargestGroupKey);
+	}
+
 	if (AvailableGroupKeys.IsValidIndex(CurrentGroupIndex)) View.ActiveGroupKey = AvailableGroupKeys[CurrentGroupIndex];
 
 	return View;
@@ -826,7 +1337,45 @@ void URTSSelectionSubsystem::AddOrUpdateSummaryGroup(TMap<FString, FRTSUnitData>
 	const FString GroupKey = GetSelectionUnitGroupKey(Data);
 	if (FRTSUnitData* ExistingGroup = GroupMap.Find(GroupKey))
 	{
+		const int32 PreviousCount = ExistingGroup->Count;
 		ExistingGroup->Count++;
+		ExistingGroup->SelectionTags.AppendTags(Data.SelectionTags);
+
+		if (Data.bHasProductionCapacity)
+		{
+			ExistingGroup->bHasProductionCapacity = true;
+			ExistingGroup->ProductionBusyLanes += Data.ProductionBusyLanes;
+			ExistingGroup->ProductionTotalLanes += Data.ProductionTotalLanes;
+			ExistingGroup->ProductionQueuedOrders += Data.ProductionQueuedOrders;
+		}
+
+		if (Data.bHasActivity)
+		{
+			if (!ExistingGroup->bHasActivity)
+			{
+				ExistingGroup->bHasActivity = true;
+				ExistingGroup->ActivityLabel = Data.ActivityLabel;
+				ExistingGroup->ActivityProgress = Data.ActivityProgress;
+				ExistingGroup->ActivityRemainingSeconds = Data.ActivityRemainingSeconds;
+				ExistingGroup->ActivityDurationSeconds = Data.ActivityDurationSeconds;
+				ExistingGroup->ActivityQueueCount = Data.ActivityQueueCount;
+			}
+			else
+			{
+				const float NewCount = static_cast<float>(PreviousCount + 1);
+				ExistingGroup->ActivityProgress =
+					(ExistingGroup->ActivityProgress * PreviousCount + Data.ActivityProgress) / NewCount;
+				ExistingGroup->ActivityRemainingSeconds =
+					(ExistingGroup->ActivityRemainingSeconds * PreviousCount + Data.ActivityRemainingSeconds) / NewCount;
+				ExistingGroup->ActivityDurationSeconds =
+					(ExistingGroup->ActivityDurationSeconds * PreviousCount + Data.ActivityDurationSeconds) / NewCount;
+				ExistingGroup->ActivityQueueCount += Data.ActivityQueueCount;
+				if (!ExistingGroup->ActivityLabel.EqualTo(Data.ActivityLabel))
+				{
+					ExistingGroup->ActivityLabel = FText::FromString(TEXT("多个生产项目"));
+				}
+			}
+		}
 		return;
 	}
 
@@ -842,6 +1391,18 @@ FRTSExternalMassCommandGridResolver& URTSSelectionSubsystem::OnResolveMassComman
 	return Resolver;
 }
 
+FRTSExternalMassUnitDataEnricher& URTSSelectionSubsystem::OnEnrichMassUnitData()
+{
+	static FRTSExternalMassUnitDataEnricher Enricher;
+	return Enricher;
+}
+
+FRTSExternalMassInstantCommandHandler& URTSSelectionSubsystem::OnHandleMassInstantCommand()
+{
+	static FRTSExternalMassInstantCommandHandler Handler;
+	return Handler;
+}
+
 FRTSExternalMassLocationCommandHandler& URTSSelectionSubsystem::OnHandleMassLocationCommand()
 {
 	static FRTSExternalMassLocationCommandHandler Handler;
@@ -852,6 +1413,18 @@ FRTSExternalMassTargetCommandHandler& URTSSelectionSubsystem::OnHandleMassTarget
 {
 	static FRTSExternalMassTargetCommandHandler Handler;
 	return Handler;
+}
+
+FRTSExternalBuildPlacementValidator& URTSSelectionSubsystem::OnValidateBuildPlacement()
+{
+	static FRTSExternalBuildPlacementValidator Validator;
+	return Validator;
+}
+
+void URTSSelectionSubsystem::RequestSelectionRefresh()
+{
+	OnSelectionChanged.Broadcast(BuildSelectionView());
+	BroadcastControlGroupsView();
 }
 
 void URTSSelectionSubsystem::BroadcastSelectionViewAndGrid(const FRTSSelectionView& View)
@@ -921,7 +1494,7 @@ bool URTSSelectionSubsystem::ResolveMassProtocolCommandGrid(const FString& Activ
 {
 	OutGrid = nullptr;
 
-	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const URTSInputPanelSettings* Settings = RTSUnitTypeProtocol::GetSettings();
 	int32 SubTypeIndex = INDEX_NONE;
 	const FRTSMassUnitTypeProtocol* Protocol = ResolveMassUnitTypeProtocol(Settings, ActiveKey, SubTypeIndex);
 	if (!Protocol)
@@ -929,9 +1502,23 @@ bool URTSSelectionSubsystem::ResolveMassProtocolCommandGrid(const FString& Activ
 		return false;
 	}
 
-	if (!Protocol->CommandGrid.IsNull())
+	const FRTSCommandLoadoutDefinition* Loadout = FindCommandLoadoutById(
+		Settings,
+		RTSUnitTypeProtocol::ResolveCommandLoadoutId(*Protocol));
+	if (Loadout)
 	{
-		if (URTSCommandGridAsset* LoadedGrid = Protocol->CommandGrid.LoadSynchronous())
+		OutGrid = ResolveCommandLoadoutGrid(Settings, *Loadout);
+		return OutGrid != nullptr;
+	}
+
+	const TSoftObjectPtr<URTSCommandGridAsset>* AuthoredGrid = &Protocol->CommandGrid;
+	const TArray<FRTSMassUnitCommandSlotDefinition>* CommandSlots = &Protocol->CommandSlots;
+	const bool bIncludeDefaultCommands = Protocol->bUseDefaultCommandGrid;
+	const FName CacheKey(*FString::Printf(TEXT("LegacyMassType_%d"), SubTypeIndex));
+
+	if (AuthoredGrid && !AuthoredGrid->IsNull())
+	{
+		if (URTSCommandGridAsset* LoadedGrid = AuthoredGrid->LoadSynchronous())
 		{
 			if (LoadedGrid->GetAllButtons().Num() > 0)
 			{
@@ -941,22 +1528,27 @@ bool URTSSelectionSubsystem::ResolveMassProtocolCommandGrid(const FString& Activ
 		}
 	}
 
-	if (Protocol->CommandSlots.Num() > 0)
+	if ((!CommandSlots || CommandSlots->Num() == 0) && !bIncludeDefaultCommands)
 	{
-		if (TObjectPtr<URTSCommandGridAsset>* CachedGrid = MassProtocolGridCache.Find(SubTypeIndex))
-		{
-			OutGrid = CachedGrid->Get();
-			return true;
-		}
+		return false;
+	}
 
-		const FName GridName(*FString::Printf(TEXT("MassType_%02d_CommandGrid"), SubTypeIndex));
-		URTSCommandGridAsset* TransientGrid = NewObject<URTSCommandGridAsset>(this, GridName);
-		if (Protocol->bUseDefaultCommandGrid)
-		{
-			AddDefaultUnitCommands(TransientGrid);
-		}
+	if (TObjectPtr<URTSCommandGridAsset>* CachedGrid = MassProtocolGridCache.Find(CacheKey))
+	{
+		OutGrid = CachedGrid->Get();
+		return OutGrid != nullptr;
+	}
 
-		for (const FRTSMassUnitCommandSlotDefinition& Slot : Protocol->CommandSlots)
+	const FName GridName(*FString::Printf(TEXT("CommandLoadout_%s"), *CacheKey.ToString()));
+	URTSCommandGridAsset* TransientGrid = NewObject<URTSCommandGridAsset>(this, GridName);
+	if (bIncludeDefaultCommands)
+	{
+		AddDefaultUnitCommands(TransientGrid);
+	}
+
+	if (CommandSlots)
+	{
+		for (const FRTSMassUnitCommandSlotDefinition& Slot : *CommandSlots)
 		{
 			FGameplayTag ResolvedCommandTag = Slot.CommandTag;
 			if (!ResolvedCommandTag.IsValid() && !Slot.CommandTagName.IsNone())
@@ -964,38 +1556,23 @@ bool URTSSelectionSubsystem::ResolveMassProtocolCommandGrid(const FString& Activ
 				ResolvedCommandTag = FGameplayTag::RequestGameplayTag(Slot.CommandTagName, false);
 			}
 
-			if (!ResolvedCommandTag.IsValid() || Slot.SlotIndex < 0 || Slot.SlotIndex > 14)
+			const int32 ResolvedSlotIndex =
+				ResolveCommandSlotIndex(ResolvedCommandTag, Slot.SlotIndex);
+			if (!ResolvedCommandTag.IsValid() || ResolvedSlotIndex < 0 || ResolvedSlotIndex > 14)
 			{
 				continue;
 			}
 
-			RemoveCommandAtSlot(TransientGrid, Slot.SlotIndex);
-
+			RemoveCommandAtSlot(TransientGrid, ResolvedSlotIndex);
 			URTSCommandButton* Button = CreateDefaultCommandButtonForTag(TransientGrid, ResolvedCommandTag);
 			ApplyCommandSlotPresentation(Button, Slot, ResolvedCommandTag);
 			TransientGrid->Buttons.Add(Button);
 		}
-
-		if (TransientGrid->Buttons.Num() > 0)
-		{
-			MassProtocolGridCache.Add(SubTypeIndex, TransientGrid);
-			OutGrid = TransientGrid;
-			return true;
-		}
 	}
 
-	if (Protocol->bUseDefaultCommandGrid)
+	if (TransientGrid->Buttons.Num() > 0)
 	{
-		if (TObjectPtr<URTSCommandGridAsset>* CachedGrid = MassProtocolGridCache.Find(SubTypeIndex))
-		{
-			OutGrid = CachedGrid->Get();
-			return true;
-		}
-
-		const FName GridName(*FString::Printf(TEXT("MassType_%02d_DefaultCommandGrid"), SubTypeIndex));
-		URTSCommandGridAsset* TransientGrid = NewObject<URTSCommandGridAsset>(this, GridName);
-		AddDefaultUnitCommands(TransientGrid);
-		MassProtocolGridCache.Add(SubTypeIndex, TransientGrid);
+		MassProtocolGridCache.Add(CacheKey, TransientGrid);
 		OutGrid = TransientGrid;
 		return true;
 	}
@@ -1003,10 +1580,814 @@ bool URTSSelectionSubsystem::ResolveMassProtocolCommandGrid(const FString& Activ
 	return false;
 }
 
+URTSCommandGridAsset* URTSSelectionSubsystem::ResolveCommandLoadoutGrid(
+	const URTSInputPanelSettings* Settings,
+	const FRTSCommandLoadoutDefinition& Loadout)
+{
+	if (!Settings || Loadout.LoadoutId.IsNone())
+	{
+		return nullptr;
+	}
+
+	// A LocalPlayer subsystem can outlive several PIE selections, so update an
+	// already-created defense submenu in place instead of leaving the old flat row.
+	if (Loadout.LoadoutId == FName(TEXT("Builder")))
+	{
+		const TObjectPtr<URTSCommandGridAsset>* CachedDefense = MassProtocolGridCache.Find(
+			FName(TEXT("BuilderDefense")));
+		if (CachedDefense)
+		{
+			ApplyBuiltInDefenseGridLayout(CachedDefense->Get());
+		}
+	}
+
+	if (!Loadout.CommandGrid.IsNull())
+	{
+		if (URTSCommandGridAsset* LoadedGrid = Loadout.CommandGrid.LoadSynchronous())
+		{
+			if (LoadedGrid->GetAllButtons().Num() > 0)
+			{
+				return LoadedGrid;
+			}
+		}
+	}
+
+	if (TObjectPtr<URTSCommandGridAsset>* CachedGrid = MassProtocolGridCache.Find(Loadout.LoadoutId))
+	{
+		return CachedGrid->Get();
+	}
+
+	if (Loadout.CommandSlots.Num() == 0 && !Loadout.bIncludeDefaultUnitCommands && Loadout.BackToLoadoutId.IsNone())
+	{
+		return nullptr;
+	}
+
+	const FName GridName(*FString::Printf(TEXT("CommandLoadout_%s"), *Loadout.LoadoutId.ToString()));
+	URTSCommandGridAsset* TransientGrid = NewObject<URTSCommandGridAsset>(this, GridName);
+
+	// Cache before resolving child/parent menus so cyclic navigation (parent <-> child) is safe.
+	MassProtocolGridCache.Add(Loadout.LoadoutId, TransientGrid);
+
+	if (Loadout.bIncludeDefaultUnitCommands)
+	{
+		AddDefaultUnitCommands(TransientGrid);
+	}
+
+	auto AddConfiguredButton = [this, Settings, TransientGrid](const FRTSMassUnitCommandSlotDefinition& Slot)
+	{
+		FGameplayTag ResolvedCommandTag = Slot.CommandTag;
+		if (!ResolvedCommandTag.IsValid() && !Slot.CommandTagName.IsNone())
+		{
+			ResolvedCommandTag = FGameplayTag::RequestGameplayTag(Slot.CommandTagName, false);
+		}
+
+		const int32 ResolvedSlotIndex =
+			ResolveCommandSlotIndex(ResolvedCommandTag, Slot.SlotIndex);
+		if (!ResolvedCommandTag.IsValid() || ResolvedSlotIndex < 0 || ResolvedSlotIndex > 14)
+		{
+			return;
+		}
+
+		URTSCommandButton* Button = nullptr;
+		if (!Slot.SubMenuLoadoutId.IsNone())
+		{
+			const FRTSCommandLoadoutDefinition* TargetLoadout = FindCommandLoadoutById(Settings, Slot.SubMenuLoadoutId);
+			URTSCommandGridAsset* TargetGrid = TargetLoadout
+				? ResolveCommandLoadoutGrid(Settings, *TargetLoadout)
+				: nullptr;
+
+			if (!TargetGrid)
+			{
+				UE_LOG(LogORTSSelection, Warning,
+					TEXT("Selection: Command loadout submenu '%s' could not be resolved."),
+					*Slot.SubMenuLoadoutId.ToString());
+				return;
+			}
+
+			URTSCmd_SubMenu* SubMenuButton = NewObject<URTSCmd_SubMenu>(TransientGrid);
+			SubMenuButton->TargetGrid = TargetGrid;
+			Button = SubMenuButton;
+		}
+		else
+		{
+			Button = CreateDefaultCommandButtonForTag(TransientGrid, ResolvedCommandTag);
+		}
+
+		RemoveCommandAtSlot(TransientGrid, ResolvedSlotIndex);
+		ApplyCommandSlotPresentation(Button, Slot, ResolvedCommandTag);
+		if (!Slot.SubMenuLoadoutId.IsNone())
+		{
+			Button->TargetType = ERTSCommandTargetType::Instant;
+		}
+		TransientGrid->Buttons.Add(Button);
+	};
+
+	for (const FRTSMassUnitCommandSlotDefinition& Slot : Loadout.CommandSlots)
+	{
+		AddConfiguredButton(Slot);
+	}
+
+	if (!Loadout.BackToLoadoutId.IsNone())
+	{
+		FRTSMassUnitCommandSlotDefinition BackSlot;
+		BackSlot.SlotIndex = Loadout.BackButtonSlotIndex;
+		BackSlot.CommandTagName = FName(TEXT("RTS.Command.Menu.Back"));
+		BackSlot.SubMenuLoadoutId = Loadout.BackToLoadoutId;
+		BackSlot.DisplayName = Loadout.BackButtonDisplayName;
+		BackSlot.Description = Loadout.BackButtonDescription;
+		BackSlot.Hotkey = Loadout.BackButtonHotkey;
+		AddConfiguredButton(BackSlot);
+	}
+
+	if (TransientGrid->Buttons.Num() == 0)
+	{
+		MassProtocolGridCache.Remove(Loadout.LoadoutId);
+		return nullptr;
+	}
+
+	return TransientGrid;
+}
+
 
 void URTSSelectionSubsystem::ClearSelection()
 {
 	SetSelectedUnits(TArray<AActor*>(), TArray<FEntityHandle>(), ERTSSelectionModifier::Replace);
+}
+
+bool URTSSelectionSubsystem::IsValidControlGroupIndex(int32 GroupIndex) const
+{
+	return GroupIndex >= MinControlGroupIndex && GroupIndex <= MaxControlGroupIndex;
+}
+
+void URTSSelectionSubsystem::PruneControlGroup(FRTSControlGroupState& Group)
+{
+	Group.Actors.RemoveAll([this](const TWeakObjectPtr<AActor>& Actor)
+	{
+		return !Actor.IsValid() || !IsActorControllable(Actor.Get());
+	});
+
+	Group.Entities.RemoveAll([this](const FEntityHandle& Handle)
+	{
+		return !IsEntityControllable(Handle);
+	});
+
+	for (int32 ActorIndex = Group.Actors.Num() - 1; ActorIndex >= 0; --ActorIndex)
+	{
+		for (int32 PreviousIndex = 0; PreviousIndex < ActorIndex; ++PreviousIndex)
+		{
+			if (Group.Actors[PreviousIndex] == Group.Actors[ActorIndex])
+			{
+				Group.Actors.RemoveAt(ActorIndex);
+				break;
+			}
+		}
+	}
+
+	for (int32 EntityIndex = Group.Entities.Num() - 1; EntityIndex >= 0; --EntityIndex)
+	{
+		if (Group.Entities.Find(Group.Entities[EntityIndex]) != EntityIndex)
+		{
+			Group.Entities.RemoveAt(EntityIndex);
+		}
+	}
+}
+
+void URTSSelectionSubsystem::PruneAllControlGroups()
+{
+	for (auto It = ControlGroups.CreateIterator(); It; ++It)
+	{
+		PruneControlGroup(It.Value());
+		if (It.Value().Actors.IsEmpty() && It.Value().Entities.IsEmpty())
+		{
+			It.RemoveCurrent();
+		}
+	}
+}
+
+bool URTSSelectionSubsystem::DoesControlGroupMatchCurrentSelection(const FRTSControlGroupState& Group) const
+{
+	if (Group.Actors.Num() != SelectedActors.Num() || Group.Entities.Num() != SelectedEntities.Num())
+	{
+		return false;
+	}
+
+	for (AActor* Actor : SelectedActors)
+	{
+		if (!Group.Actors.ContainsByPredicate([Actor](const TWeakObjectPtr<AActor>& Entry)
+		{
+			return Entry.Get() == Actor;
+		}))
+		{
+			return false;
+		}
+	}
+
+	for (const FEntityHandle& Handle : SelectedEntities)
+	{
+		if (!Group.Entities.Contains(Handle))
+		{
+			return false;
+		}
+	}
+
+	return Group.Actors.Num() + Group.Entities.Num() > 0;
+}
+
+void URTSSelectionSubsystem::UpdateActiveControlGroupIndex()
+{
+	PruneAllControlGroups();
+
+	auto IsMatchingGroup = [this](int32 GroupIndex)
+	{
+		const FRTSControlGroupState* Group = ControlGroups.Find(GroupIndex);
+		return Group && DoesControlGroupMatchCurrentSelection(*Group);
+	};
+
+	if (IsValidControlGroupIndex(PreferredActiveControlGroupIndex)
+		&& IsMatchingGroup(PreferredActiveControlGroupIndex))
+	{
+		ActiveControlGroupIndex = PreferredActiveControlGroupIndex;
+		PreferredActiveControlGroupIndex = INDEX_NONE;
+		return;
+	}
+	PreferredActiveControlGroupIndex = INDEX_NONE;
+
+	if (IsValidControlGroupIndex(ActiveControlGroupIndex) && IsMatchingGroup(ActiveControlGroupIndex))
+	{
+		return;
+	}
+
+	ActiveControlGroupIndex = INDEX_NONE;
+	for (const int32 GroupIndex : ControlGroupDisplayOrder)
+	{
+		if (IsMatchingGroup(GroupIndex))
+		{
+			ActiveControlGroupIndex = GroupIndex;
+			break;
+		}
+	}
+}
+
+bool URTSSelectionSubsystem::AssignCurrentSelectionToControlGroup(int32 GroupIndex, ERTSControlGroupAssignmentMode AssignmentMode)
+{
+	if (!IsValidControlGroupIndex(GroupIndex))
+	{
+		return false;
+	}
+
+	PruneAllControlGroups();
+
+	if (AssignmentMode == ERTSControlGroupAssignmentMode::StealAndReplace)
+	{
+		for (auto& Pair : ControlGroups)
+		{
+			FRTSControlGroupState& ExistingGroup = Pair.Value;
+			ExistingGroup.Actors.RemoveAll([this](const TWeakObjectPtr<AActor>& Actor)
+			{
+				return SelectedActors.Contains(Actor.Get());
+			});
+			ExistingGroup.Entities.RemoveAll([this](const FEntityHandle& Handle)
+			{
+				return SelectedEntities.Contains(Handle);
+			});
+		}
+	}
+
+	FRTSControlGroupState& Group = ControlGroups.FindOrAdd(GroupIndex);
+
+	if (AssignmentMode == ERTSControlGroupAssignmentMode::ToggleMembership)
+	{
+		if (SelectedActors.IsEmpty() && SelectedEntities.IsEmpty())
+		{
+			return false;
+		}
+
+		const bool bContainsEverySelectedActor = Algo::AllOf(SelectedActors, [&Group](AActor* Actor)
+		{
+			return Group.Actors.ContainsByPredicate([Actor](const TWeakObjectPtr<AActor>& Entry)
+			{
+				return Entry.Get() == Actor;
+			});
+		});
+		const bool bContainsEverySelectedEntity = Algo::AllOf(SelectedEntities, [&Group](const FEntityHandle& Handle)
+		{
+			return Group.Entities.Contains(Handle);
+		});
+
+		if (bContainsEverySelectedActor && bContainsEverySelectedEntity)
+		{
+			Group.Actors.RemoveAll([this](const TWeakObjectPtr<AActor>& Actor)
+			{
+				return SelectedActors.Contains(Actor.Get());
+			});
+			Group.Entities.RemoveAll([this](const FEntityHandle& Handle)
+			{
+				return SelectedEntities.Contains(Handle);
+			});
+		}
+		else
+		{
+			for (AActor* Actor : SelectedActors)
+			{
+				Group.Actors.AddUnique(Actor);
+			}
+			for (const FEntityHandle& Handle : SelectedEntities)
+			{
+				Group.Entities.AddUnique(Handle);
+			}
+		}
+	}
+	else
+	{
+		Group.Actors.Reset();
+		Group.Entities = SelectedEntities;
+		for (AActor* Actor : SelectedActors)
+		{
+			Group.Actors.Add(Actor);
+		}
+	}
+
+	PruneAllControlGroups();
+	PreferredActiveControlGroupIndex = GroupIndex;
+	UpdateActiveControlGroupIndex();
+	BroadcastControlGroupsView();
+
+	UE_LOG(LogORTSSelection, Log, TEXT("ControlGroup %d assigned: mode=%d actors=%d entities=%d"),
+		GroupIndex,
+		static_cast<int32>(AssignmentMode),
+		SelectedActors.Num(),
+		SelectedEntities.Num());
+	return true;
+}
+
+bool URTSSelectionSubsystem::RecallControlGroup(int32 GroupIndex, bool bAddToSelection)
+{
+	if (!IsValidControlGroupIndex(GroupIndex))
+	{
+		return false;
+	}
+
+	FRTSControlGroupState* Group = ControlGroups.Find(GroupIndex);
+	if (!Group)
+	{
+		return false;
+	}
+
+	PruneControlGroup(*Group);
+	if (Group->Actors.IsEmpty() && Group->Entities.IsEmpty())
+	{
+		ControlGroups.Remove(GroupIndex);
+		BroadcastControlGroupsView();
+		return false;
+	}
+
+	TArray<AActor*> Actors;
+	Actors.Reserve(Group->Actors.Num());
+	for (const TWeakObjectPtr<AActor>& Actor : Group->Actors)
+	{
+		if (Actor.IsValid())
+		{
+			Actors.Add(Actor.Get());
+		}
+	}
+
+	const TArray<FEntityHandle> Entities = Group->Entities;
+	PreferredActiveControlGroupIndex = bAddToSelection ? INDEX_NONE : GroupIndex;
+	SetSelectedUnits(Actors, Entities, bAddToSelection ? ERTSSelectionModifier::Add : ERTSSelectionModifier::Replace);
+	return true;
+}
+
+void URTSSelectionSubsystem::ClearControlGroup(int32 GroupIndex)
+{
+	if (!IsValidControlGroupIndex(GroupIndex))
+	{
+		return;
+	}
+
+	ControlGroups.Remove(GroupIndex);
+	if (ActiveControlGroupIndex == GroupIndex)
+	{
+		ActiveControlGroupIndex = INDEX_NONE;
+	}
+	UpdateActiveControlGroupIndex();
+	BroadcastControlGroupsView();
+}
+
+FRTSControlGroupView URTSSelectionSubsystem::BuildControlGroupView(int32 GroupIndex, const FRTSControlGroupState* Group) const
+{
+	FRTSControlGroupView View;
+	View.GroupIndex = GroupIndex;
+	View.bActive = GroupIndex == ActiveControlGroupIndex;
+
+	if (!Group)
+	{
+		return View;
+	}
+
+	TMap<FString, FRTSControlGroupComposition> CompositionByKey;
+	auto AddData = [&CompositionByKey](const FRTSUnitData& UnitData)
+	{
+		const FString Key = GetSelectionUnitGroupKey(UnitData);
+		if (FRTSControlGroupComposition* Existing = CompositionByKey.Find(Key))
+		{
+			++Existing->Count;
+			Existing->UnitType.Count = Existing->Count;
+			Existing->UnitType.SelectionTags.AppendTags(UnitData.SelectionTags);
+			return;
+		}
+
+		FRTSControlGroupComposition Entry;
+		Entry.UnitType = UnitData;
+		Entry.UnitType.ActorPtr = nullptr;
+		Entry.UnitType.EntityHandle.Reset();
+		Entry.UnitType.Count = 1;
+		Entry.Count = 1;
+		CompositionByKey.Add(Key, MoveTemp(Entry));
+	};
+
+	for (const TWeakObjectPtr<AActor>& Actor : Group->Actors)
+	{
+		if (Actor.IsValid())
+		{
+			AddData(CreateUnitDataFromActor(Actor.Get()));
+			++View.UnitCount;
+		}
+	}
+	for (const FEntityHandle& Handle : Group->Entities)
+	{
+		if (IsEntityControllable(Handle))
+		{
+			AddData(CreateUnitDataFromEntity(Handle));
+			++View.UnitCount;
+		}
+	}
+
+	CompositionByKey.GenerateValueArray(View.Composition);
+	View.Composition.Sort([](const FRTSControlGroupComposition& A, const FRTSControlGroupComposition& B)
+	{
+		if (A.Count != B.Count)
+		{
+			return A.Count > B.Count;
+		}
+		return A.UnitType.Name < B.UnitType.Name;
+	});
+
+	View.bAssigned = View.UnitCount > 0;
+	if (!View.Composition.IsEmpty())
+	{
+		View.RepresentativeUnit = View.Composition[0].UnitType;
+		View.RepresentativeUnit.Count = View.UnitCount;
+	}
+	return View;
+}
+
+FRTSControlGroupsView URTSSelectionSubsystem::GetControlGroupsView()
+{
+	PruneAllControlGroups();
+	UpdateActiveControlGroupIndex();
+
+	FRTSControlGroupsView View;
+	View.ActiveGroupIndex = ActiveControlGroupIndex;
+	View.Groups.Reserve(UE_ARRAY_COUNT(ControlGroupDisplayOrder));
+	for (const int32 GroupIndex : ControlGroupDisplayOrder)
+	{
+		View.Groups.Add(BuildControlGroupView(GroupIndex, ControlGroups.Find(GroupIndex)));
+	}
+	return View;
+}
+
+void URTSSelectionSubsystem::BroadcastControlGroupsView()
+{
+	OnControlGroupsChanged.Broadcast(GetControlGroupsView());
+}
+
+void URTSSelectionSubsystem::RequestControlGroupsRefresh()
+{
+	BroadcastControlGroupsView();
+}
+
+bool URTSSelectionSubsystem::GetControlGroupFocusLocation(int32 GroupIndex, FVector& OutWorldCenter)
+{
+	FRTSControlGroupState* Group = ControlGroups.Find(GroupIndex);
+	if (!Group)
+	{
+		return false;
+	}
+
+	PruneControlGroup(*Group);
+	TArray<FVector> UnitLocations;
+	UnitLocations.Reserve(Group->Entities.Num() + Group->Actors.Num());
+
+	// Mass is the primary path. FLocating gives us an actual live-unit position,
+	// so focus can never land in the empty midpoint between separated formations.
+	if (UWorld* World = GetWorld())
+	{
+		if (UMassEntitySubsystem* MassSubsystem = World->GetSubsystem<UMassEntitySubsystem>())
+		{
+			FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+			for (const FEntityHandle& Handle : Group->Entities)
+			{
+				const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
+				if (EntityManager.IsEntityActive(NativeHandle))
+				{
+					if (const FLocating* Locating = EntityManager.GetFragmentDataPtr<FLocating>(NativeHandle))
+					{
+						UnitLocations.Add(Locating->Location);
+					}
+				}
+			}
+		}
+	}
+
+	// Actor positions are retained only for explicitly enabled legacy selections.
+	for (const TWeakObjectPtr<AActor>& Actor : Group->Actors)
+	{
+		if (Actor.IsValid())
+		{
+			UnitLocations.Add(Actor->GetActorLocation());
+		}
+	}
+
+	if (UnitLocations.IsEmpty())
+	{
+		return false;
+	}
+
+	// A bounded deterministic reservoir sample represents large Mass groups without
+	// an O(N^2) scan. Sampling is uniform, so populous clusters contribute more
+	// candidates; the trimmed medoid then chooses a real unit inside the dominant
+	// dense cluster while ignoring remote split-group outliers.
+	TArray<FVector> Samples;
+	Samples.Reserve(FMath::Min(UnitLocations.Num(), MaxControlGroupFocusSamples));
+	const int32 InitialSampleCount = FMath::Min(UnitLocations.Num(), MaxControlGroupFocusSamples);
+	for (int32 Index = 0; Index < InitialSampleCount; ++Index)
+	{
+		Samples.Add(UnitLocations[Index]);
+	}
+
+	if (UnitLocations.Num() > MaxControlGroupFocusSamples)
+	{
+		const int32 Seed = static_cast<int32>(HashCombine(GetTypeHash(GroupIndex), GetTypeHash(UnitLocations.Num())));
+		FRandomStream RandomStream(Seed);
+		for (int32 Index = MaxControlGroupFocusSamples; Index < UnitLocations.Num(); ++Index)
+		{
+			const int32 ReplacementIndex = RandomStream.RandRange(0, Index);
+			if (ReplacementIndex < MaxControlGroupFocusSamples)
+			{
+				Samples[ReplacementIndex] = UnitLocations[Index];
+			}
+		}
+	}
+
+	const int32 RetainedDistanceCount = FMath::Clamp(
+		FMath::CeilToInt(Samples.Num() * ControlGroupFocusRetainedFraction),
+		1,
+		Samples.Num());
+	int32 BestSampleIndex = 0;
+	double BestDensityScore = TNumericLimits<double>::Max();
+	TArray<double> Distances;
+	Distances.Reserve(Samples.Num());
+
+	for (int32 CandidateIndex = 0; CandidateIndex < Samples.Num(); ++CandidateIndex)
+	{
+		Distances.Reset();
+		for (const FVector& OtherLocation : Samples)
+		{
+			Distances.Add(FVector::DistSquared2D(Samples[CandidateIndex], OtherLocation));
+		}
+		Distances.Sort();
+
+		double DensityScore = 0.0;
+		for (int32 DistanceIndex = 0; DistanceIndex < RetainedDistanceCount; ++DistanceIndex)
+		{
+			DensityScore += Distances[DistanceIndex];
+		}
+		if (DensityScore < BestDensityScore)
+		{
+			BestDensityScore = DensityScore;
+			BestSampleIndex = CandidateIndex;
+		}
+	}
+
+	OutWorldCenter = Samples[BestSampleIndex];
+	return true;
+}
+
+bool URTSSelectionSubsystem::RequestControlGroupFocus(int32 GroupIndex)
+{
+	FVector WorldCenter = FVector::ZeroVector;
+	if (!IsValidControlGroupIndex(GroupIndex) || !GetControlGroupFocusLocation(GroupIndex, WorldCenter))
+	{
+		return false;
+	}
+
+	OnControlGroupFocusRequested.Broadcast(GroupIndex, WorldCenter);
+	return true;
+}
+
+FGameplayTagContainer URTSSelectionSubsystem::BuildSelectionTags(
+	const FString& TypeKey,
+	const FString& Role,
+	const FGameplayTagContainer& ExplicitTags) const
+{
+	FGameplayTagContainer Tags = ExplicitTags;
+	const FString SearchText = (TypeKey + TEXT(" ") + Role).ToLower();
+	const FGameplayTag StructureRootTag = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.Selection.Structure")), false);
+	const bool bExplicitStructure = StructureRootTag.IsValid() && Tags.HasTag(StructureRootTag);
+
+	const bool bStructure = bExplicitStructure || ContainsAny(SearchText,
+		{ TEXT("structure"), TEXT("defence"), TEXT("defense"), TEXT("bunker"), TEXT("building"), TEXT("production"),
+		  TEXT("barracks"), TEXT("factory"), TEXT("shipyard"), TEXT("airfield"), TEXT("airport"), TEXT("government"),
+		  TEXT("research"), TEXT("university"), TEXT("city"), TEXT("port"), TEXT("headquarters"), TEXT("camp"),
+		  TEXT("建筑"), TEXT("碉堡"), TEXT("城市"), TEXT("大学"), TEXT("科研"), TEXT("政府"), TEXT("港口"),
+		  TEXT("机场"), TEXT("兵营"), TEXT("军营") });
+
+	if (bStructure)
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Structure"));
+		if (ContainsAny(SearchText, { TEXT("defence"), TEXT("defense"), TEXT("bunker"), TEXT("防御"), TEXT("碉堡") }))
+		{
+			AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Defense"));
+		}
+		if (ContainsAny(SearchText, { TEXT("city"), TEXT("城市") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.City"));
+		if (ContainsAny(SearchText, { TEXT("university"), TEXT("大学") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.University"));
+		if (ContainsAny(SearchText, { TEXT("research"), TEXT("科研") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Research"));
+		if (ContainsAny(SearchText, { TEXT("government"), TEXT("政府") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Government"));
+		if (ContainsAny(SearchText, { TEXT("shipyard"), TEXT("port"), TEXT("港口"), TEXT("船厂") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Port"));
+		if (ContainsAny(SearchText, { TEXT("airfield"), TEXT("airport"), TEXT("机场") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Airport"));
+		if (ContainsAny(SearchText, { TEXT("barracks"), TEXT("兵营") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.Barracks"));
+		if (ContainsAny(SearchText, { TEXT("camp"), TEXT("base"), TEXT("headquarters"), TEXT("军营"), TEXT("基地") })) AddSelectionTag(Tags, TEXT("RTS.Selection.Structure.MilitaryCamp"));
+		return Tags;
+	}
+
+	// A subtype without a protocol has no trustworthy semantic class. Defaulting every
+	// unknown entity to army previously made newly-authored buildings enter army queries.
+	// Such entities remain manually selectable until their country implementation is mapped.
+	if (TypeKey.StartsWith(TEXT("MassUnit.SubType.")))
+	{
+		return Tags;
+	}
+
+	AddSelectionTag(Tags, TEXT("RTS.Selection.Army"));
+	if (ContainsAny(SearchText, { TEXT("aircraft"), TEXT("airplane"), TEXT("fighter"), TEXT("bomber"), TEXT("helicopter"), TEXT("飞机"), TEXT("空军") }))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Air"));
+		return Tags;
+	}
+	if (ContainsAny(SearchText, { TEXT("navy"), TEXT("naval."), TEXT("ship"), TEXT("vessel"), TEXT("海军"), TEXT("舰") })
+		&& !SearchText.Contains(TEXT("navalinfantry")))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Naval"));
+		return Tags;
+	}
+
+	AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground"));
+	if (ContainsAny(SearchText, { TEXT("engineer"), TEXT("builder"), TEXT("工兵"), TEXT("工程") }))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Engineer"));
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Worker"));
+	}
+	else if (ContainsAny(SearchText, { TEXT("artillery"), TEXT("mortar"), TEXT("rocketbattery"), TEXT("anti-tank gun"), TEXT("antitankgun"), TEXT("火炮"), TEXT("迫击炮"), TEXT("火箭炮") }))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Artillery"));
+	}
+	else if (ContainsAny(SearchText, { TEXT("armor"), TEXT("armour"), TEXT("tank"), TEXT("vehicle"), TEXT("halftrack"), TEXT("armoredcar"), TEXT("装甲"), TEXT("坦克"), TEXT("战车") }))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Armor"));
+	}
+	else
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Infantry"));
+	}
+
+	return Tags;
+}
+
+bool URTSSelectionSubsystem::IsMassEntityIdle(const FEntityHandle& Handle) const
+{
+	UWorld* World = GetWorld();
+	UMassEntitySubsystem* MassSubsystem = World ? World->GetSubsystem<UMassEntitySubsystem>() : nullptr;
+	if (!MassSubsystem)
+	{
+		return false;
+	}
+
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+	const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
+	if (!EntityManager.IsEntityActive(NativeHandle))
+	{
+		return false;
+	}
+
+	const FEntityFlagFragment* Flags = EntityManager.GetFragmentDataPtr<FEntityFlagFragment>(NativeHandle);
+	return Flags && Flags->HasFlagByName(FName(TEXT("Idle")));
+}
+
+void URTSSelectionSubsystem::CollectUnitsMatchingQuery(
+	const FRTSSelectionQuery& Query,
+	TArray<AActor*>& OutActors,
+	TArray<FEntityHandle>& OutEntities) const
+{
+	OutActors.Reset();
+	OutEntities.Reset();
+
+	// Mass is the primary runtime path. It queries only the minimal identity/team
+	// fragments, then resolves the RTS category protocol without touching proxies.
+	if (Query.bIncludeMassEntities)
+	{
+		FEntityQuery EntityQuery;
+		EntityQuery.All<FTeam, FSubType>();
+		const TArray<FEntityHandle> Candidates = UMassAPIFuncLib::GetMatchingEntities(this, EntityQuery);
+		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+
+		UWorld* World = GetWorld();
+		UMassEntitySubsystem* MassSubsystem = World ? World->GetSubsystem<UMassEntitySubsystem>() : nullptr;
+		FMassEntityManager* EntityManager = MassSubsystem ? &MassSubsystem->GetMutableEntityManager() : nullptr;
+		for (const FEntityHandle& Handle : Candidates)
+		{
+			if (!IsEntityControllable(Handle) || (Query.bIdleOnly && !IsMassEntityIdle(Handle)) || !EntityManager)
+			{
+				continue;
+			}
+
+			const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
+			const FSubType* SubType = EntityManager->GetFragmentDataPtr<FSubType>(NativeHandle);
+			if (!SubType)
+			{
+				continue;
+			}
+
+			const FRTSMassUnitTypeProtocol* Protocol = FindMassUnitTypeProtocolForEntity(
+				Settings, *EntityManager, NativeHandle, SubType->Index);
+			const FString TypeKey = GetMassProtocolTypeKey(Protocol, SubType->Index);
+			const FString Role = Protocol ? Protocol->Role : FString();
+			const FGameplayTagContainer ExplicitTags = Protocol ? Protocol->SelectionTags : FGameplayTagContainer();
+			const FGameplayTagContainer SelectionTags = BuildSelectionTags(TypeKey, Role, ExplicitTags);
+			if (MatchesRequiredSelectionTag(Query, SelectionTags))
+			{
+				OutEntities.Add(Handle);
+			}
+		}
+	}
+
+	// Actor-backed units are retained as a compatibility path for authored actors.
+	if (Query.bIncludeActorUnits)
+	{
+		UWorld* World = GetWorld();
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			URTSSelectable* Selectable = Actor ? Actor->FindComponentByClass<URTSSelectable>() : nullptr;
+			if (!Selectable || !IsActorControllable(Actor) || (Query.bIdleOnly && !Selectable->bIsIdle))
+			{
+				continue;
+			}
+
+			// A visual proxy must not be counted a second time beside its Mass entity.
+			if (Query.bIncludeMassEntities)
+			{
+				if (const UMassBattleAgentComponent* MassAgent = Actor->FindComponentByClass<UMassBattleAgentComponent>())
+				{
+					if (MassAgent->GetEntityHandle().IsSet())
+					{
+						continue;
+					}
+				}
+			}
+
+			const FString TypeKey = GetActorGroupKey(Actor);
+			const FString Role = Actor->GetClass() ? Actor->GetClass()->GetName() : Actor->GetName();
+			const FGameplayTagContainer SelectionTags = BuildSelectionTags(TypeKey, Role, Selectable->SelectionTags);
+			if (MatchesRequiredSelectionTag(Query, SelectionTags))
+			{
+				OutActors.Add(Actor);
+			}
+		}
+	}
+}
+
+int32 URTSSelectionSubsystem::SelectUnitsByQuery(const FRTSSelectionQuery& Query, ERTSSelectionModifier Modifier)
+{
+	TArray<AActor*> Actors;
+	TArray<FEntityHandle> Entities;
+	CollectUnitsMatchingQuery(Query, Actors, Entities);
+
+	if (Actors.IsEmpty() && Entities.IsEmpty() && Modifier != ERTSSelectionModifier::Replace)
+	{
+		return 0;
+	}
+
+	SetSelectedUnits(Actors, Entities, Modifier);
+	return Actors.Num() + Entities.Num();
+}
+
+int32 URTSSelectionSubsystem::CountUnitsByQuery(const FRTSSelectionQuery& Query) const
+{
+	TArray<AActor*> Actors;
+	TArray<FEntityHandle> Entities;
+	CollectUnitsMatchingQuery(Query, Actors, Entities);
+	return Actors.Num() + Entities.Num();
 }
 
 void URTSSelectionSubsystem::CycleGroup()
@@ -1050,7 +2431,7 @@ void URTSSelectionSubsystem::SelectGroup(const FString& GroupKey)
 	TArray<FEntityHandle> NewEntities;
 
 	for (AActor* Act : SelectedActors) if (Act && GetActorGroupKey(Act) == GroupKey) NewActors.Add(Act);
-	for (const FEntityHandle& Handle : SelectedEntities) 
+	for (const FEntityHandle& Handle : SelectedEntities)
     {
         FRTSUnitData Data = CreateUnitDataFromEntity(Handle);
         if (GetSelectionUnitGroupKey(Data) == GroupKey) NewEntities.Add(Handle);
@@ -1069,7 +2450,7 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromActor(AActor* Actor) cons
 		Data.Name = Data.GroupKey;
 		Data.ActorPtr = Actor;
 		Data.bIsMassEntity = false;
-		
+
 		if (auto Selectable = Actor->FindComponentByClass<URTSSelectable>())
 		{
 			Data.Icon = Selectable->Icon;
@@ -1080,11 +2461,39 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromActor(AActor* Actor) cons
 			Data.MaxEnergy = Selectable->MaxEnergy;
 			Data.Shield = Selectable->Shield;
 			Data.MaxShield = Selectable->MaxShield;
+			const FString ActorRole = Actor->GetClass() ? Actor->GetClass()->GetName() : Actor->GetName();
+			Data.SelectionTags = BuildSelectionTags(Data.TypeKey, ActorRole, Selectable->SelectionTags);
+		}
+		else
+		{
+			Data.SelectionTags = BuildSelectionTags(Data.TypeKey, FString(), FGameplayTagContainer());
 		}
 
 		if (!Data.Icon)
 		{
 			Data.Icon = LoadDefaultUnitPanelIconBySeed(GetTypeHash(Data.Name));
+		}
+		if (Actor->Implements<URTSCommandProgressProvider>())
+		{
+			IRTSCommandProgressProvider::Execute_GetCommandProgressItems(
+				Actor,
+				Data.CommandProgressItems);
+			if (!Data.CommandProgressItems.IsEmpty())
+			{
+				const FRTSTimedCommandInstance& First =
+					Data.CommandProgressItems[0];
+				Data.bHasActivity = true;
+				Data.ActivityLabel = First.CommandButton
+					? First.CommandButton->DisplayName
+					: (!First.DisplayName.IsEmpty()
+						? First.DisplayName
+						: FText::FromName(First.PayloadId));
+				Data.ActivityProgress = First.GetProgress01();
+				Data.ActivityRemainingSeconds =
+					First.GetRemainingSeconds();
+				Data.ActivityDurationSeconds = First.DurationSeconds;
+				Data.ActivityQueueCount = Data.CommandProgressItems.Num();
+			}
 		}
 		EnsureSelectionDataDefaults(Data, INDEX_NONE, GetTypeHash(Data.Name));
 	}
@@ -1113,7 +2522,8 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
 				{
 					const int32 SubTypeIndex = SubFrag->Index;
 					const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
-					const FRTSMassUnitTypeProtocol* Protocol = FindMassUnitTypeProtocolByIndex(Settings, SubTypeIndex);
+					const FRTSMassUnitTypeProtocol* Protocol = FindMassUnitTypeProtocolForEntity(
+						Settings, EM, NativeHandle, SubTypeIndex);
 					Data.SubTypeIndex = SubTypeIndex;
 					Data.TypeKey = GetMassProtocolTypeKey(Protocol, SubTypeIndex);
 					Data.GroupKey = Data.TypeKey;
@@ -1121,6 +2531,10 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
 					Data.Icon = GetMassSubtypeUnitPanelIcon(SubTypeIndex);
 					Data.Portrait = GetMassSubtypeUnitAvatar(SubTypeIndex);
 					ApplyMassProtocolToUnitData(Data, Protocol, SubTypeIndex);
+					Data.SelectionTags = BuildSelectionTags(
+						Data.TypeKey,
+						Data.Role,
+						Protocol ? Protocol->SelectionTags : FGameplayTagContainer());
 
 					if (const FHealth* Health = EM.GetFragmentDataPtr<FHealth>(NativeHandle))
 					{
@@ -1129,6 +2543,7 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
 					}
 
 					EnsureSelectionDataDefaults(Data, SubTypeIndex, static_cast<uint32>(SubTypeIndex));
+					OnEnrichMassUnitData().Broadcast(World, Handle, Data);
                     return Data;
                 }
             }
@@ -1138,8 +2553,10 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
     Data.Name = TEXT("Mass Unit");
 	Data.GroupKey = FString::Printf(TEXT("MassUnit.Entity.%d"), Handle.Index);
 	Data.TypeKey = Data.GroupKey;
+	Data.SelectionTags = BuildSelectionTags(Data.TypeKey, FString(), FGameplayTagContainer());
 	Data.Icon = LoadDefaultUnitPanelIconBySeed(static_cast<uint32>(Handle.Index));
 	EnsureSelectionDataDefaults(Data, INDEX_NONE, static_cast<uint32>(Handle.Index));
+	OnEnrichMassUnitData().Broadcast(World, Handle, Data);
 	return Data;
 }
 
@@ -1147,14 +2564,22 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
 void URTSSelectionSubsystem::IssueCommand(FGameplayTag CommandTag)
 {
     UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued to Current Selection."), *CommandTag.ToString());
+	const bool bHadSelection = !SelectedEntities.IsEmpty() || !SelectedActors.IsEmpty();
 
     if (SelectedEntities.Num() > 0)
     {
+		bool bHandledByExternalMassSystem = false;
+		const FRTSSelectionView View = BuildSelectionView();
+		OnHandleMassInstantCommand().Broadcast(this, CommandTag, View, bHandledByExternalMassSystem);
+
         if (ULocalPlayer* LP = GetLocalPlayer())
         {
-            if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+            if (!bHandledByExternalMassSystem)
             {
-                SignalHub->IssueCommand(CommandTag, nullptr);
+                if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+                {
+                    SignalHub->IssueCommand(CommandTag, nullptr);
+                }
             }
         }
     }
@@ -1164,29 +2589,58 @@ void URTSSelectionSubsystem::IssueCommand(FGameplayTag CommandTag)
 		if (Actor && Actor->Implements<URTSCommandInterface>())
 		{
 			IRTSCommandInterface::Execute_ExecuteCommand(Actor, CommandTag);
+			if (ClearsTaskVisualization(CommandTag))
+			{
+				if (URTSSelectable* Selectable = Actor->FindComponentByClass<URTSSelectable>())
+				{
+					Selectable->ClearCurrentTaskVisualization();
+				}
+			}
 		}
 	}
 
-    RequestCommandRefresh();
+	if (bHadSelection)
+	{
+		OnCommandFeedbackIssued.Broadcast(
+			CommandTag,
+			FVector::ZeroVector,
+			false,
+			false);
+	}
 }
 
-void URTSSelectionSubsystem::IssueCommandWithLocation(FGameplayTag CommandTag, FVector Location)
+void URTSSelectionSubsystem::IssueCommandWithLocation(FGameplayTag CommandTag, FVector Location, bool bQueue)
 {
-    UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued with Location %s"), *CommandTag.ToString(), *Location.ToString());
+    UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued with Location %s (Queue=%d)"),
+		*CommandTag.ToString(), *Location.ToString(), bQueue);
+	const bool bHadSelection = !SelectedEntities.IsEmpty() || !SelectedActors.IsEmpty();
 
     if (SelectedEntities.Num() > 0)
     {
 		bool bHandledByExternalMassSystem = false;
+		const bool bComposableCommand = IsComposableContextCommand(CommandTag);
 		const FRTSSelectionView View = BuildSelectionView();
-		OnHandleMassLocationCommand().Broadcast(this, CommandTag, Location, View, bHandledByExternalMassSystem);
+		{
+			// Optional systems (for example production rally points) may consume their
+			// compatible slice without hiding the rest of a mixed selection.
+			TGuardValue<bool> ExposeAllSelectedGuard(
+				bExposeAllSelectedMassForComposableCommand,
+				bComposableCommand);
+			OnHandleMassLocationCommand().Broadcast(
+				this,
+				CommandTag,
+				Location,
+				View,
+				bHandledByExternalMassSystem);
+		}
 
         if (ULocalPlayer* LP = GetLocalPlayer())
         {
-            if (!bHandledByExternalMassSystem)
+            if (!bHandledByExternalMassSystem || bComposableCommand)
             {
                 if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
                 {
-                    SignalHub->IssueCommandWithLocation(CommandTag, Location);
+                    SignalHub->IssueCommandWithLocation(CommandTag, Location, bQueue);
                 }
             }
         }
@@ -1197,25 +2651,47 @@ void URTSSelectionSubsystem::IssueCommandWithLocation(FGameplayTag CommandTag, F
 		if (Actor && Actor->Implements<URTSCommandInterface>())
 		{
 			IRTSCommandInterface::Execute_ExecuteCommandWithLocation(Actor, CommandTag, Location);
+			if (IsComposableContextCommand(CommandTag))
+			{
+				if (URTSSelectable* Selectable = Actor->FindComponentByClass<URTSSelectable>())
+				{
+					Selectable->SetCurrentTaskVisualization(CommandTag, Location);
+				}
+			}
 		}
 	}
 
-    RequestCommandRefresh();
+	if (bHadSelection)
+	{
+		OnCommandFeedbackIssued.Broadcast(CommandTag, Location, true, bQueue);
+	}
 }
 
 void URTSSelectionSubsystem::IssueCommandWithTarget(FGameplayTag CommandTag, AActor* TargetActor)
 {
     UE_LOG(LogTemp, Log, TEXT("RTSSelectionSubsystem: Command %s Issued with TargetActor %s"), *CommandTag.ToString(), TargetActor ? *TargetActor->GetName() : TEXT("NULL"));
+	const bool bHadSelection = !SelectedEntities.IsEmpty() || !SelectedActors.IsEmpty();
 
     if (SelectedEntities.Num() > 0)
     {
 		bool bHandledByExternalMassSystem = false;
+		const bool bComposableCommand = IsComposableContextCommand(CommandTag);
 		const FRTSSelectionView View = BuildSelectionView();
-		OnHandleMassTargetCommand().Broadcast(this, CommandTag, TargetActor, View, bHandledByExternalMassSystem);
+		{
+			TGuardValue<bool> ExposeAllSelectedGuard(
+				bExposeAllSelectedMassForComposableCommand,
+				bComposableCommand);
+			OnHandleMassTargetCommand().Broadcast(
+				this,
+				CommandTag,
+				TargetActor,
+				View,
+				bHandledByExternalMassSystem);
+		}
 
         if (ULocalPlayer* LP = GetLocalPlayer())
         {
-            if (!bHandledByExternalMassSystem)
+            if (!bHandledByExternalMassSystem || bComposableCommand)
             {
                 if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
                 {
@@ -1230,10 +2706,24 @@ void URTSSelectionSubsystem::IssueCommandWithTarget(FGameplayTag CommandTag, AAc
 		if (Actor && Actor->Implements<URTSCommandInterface>())
 		{
 			IRTSCommandInterface::Execute_ExecuteCommandWithTarget(Actor, CommandTag, TargetActor);
+			if (TargetActor && IsComposableContextCommand(CommandTag))
+			{
+				if (URTSSelectable* Selectable = Actor->FindComponentByClass<URTSSelectable>())
+				{
+					Selectable->SetCurrentTaskVisualization(CommandTag, TargetActor->GetActorLocation());
+				}
+			}
 		}
 	}
 
-    RequestCommandRefresh();
+	if (bHadSelection && TargetActor)
+	{
+		OnCommandFeedbackIssued.Broadcast(
+			CommandTag,
+			TargetActor->GetActorLocation(),
+			true,
+			false);
+	}
 }
 
 FString URTSSelectionSubsystem::GetActiveGroupKey() const
@@ -1248,6 +2738,11 @@ FString URTSSelectionSubsystem::GetActiveGroupKey() const
 
 TArray<FEntityHandle> URTSSelectionSubsystem::GetActiveMassEntities() const
 {
+	if (bExposeAllSelectedMassForComposableCommand)
+	{
+		return SelectedEntities;
+	}
+
 	const FString ActiveKey = GetActiveGroupKey();
 	if (ActiveKey.IsEmpty())
 	{
@@ -1264,7 +2759,26 @@ TArray<FEntityHandle> URTSSelectionSubsystem::GetActiveMassEntities() const
 		}
 	}
 
-	return Result.Num() > 0 ? Result : SelectedEntities;
+	if (Result.Num() > 0)
+	{
+		return Result;
+	}
+
+	// A mixed selection can expose an Actor group (for example a building)
+	// alongside Mass unit groups. When that Actor group is active, returning all
+	// selected Mass entities would make a command intended for the building also
+	// move the army. An active Actor group deliberately has no active Mass units.
+	for (AActor* Actor : SelectedActors)
+	{
+		if (Actor && GetActorGroupKey(Actor) == ActiveKey)
+		{
+			return {};
+		}
+	}
+
+	// Keep the legacy fallback only for stale/malformed group keys so an ordinary
+	// Mass-only selection is not left without a command target.
+	return SelectedEntities;
 }
 
 AActor* URTSSelectionSubsystem::GetActiveActor() const

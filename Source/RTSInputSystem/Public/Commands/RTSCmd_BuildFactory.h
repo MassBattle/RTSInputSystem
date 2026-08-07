@@ -8,7 +8,7 @@
 
 /**
  * Built-in Command: Build Factory
- * - Cost: 100 Minerals (Mock)
+ * - Cost: 365 cash
  * - CD: 75s
  * - Auto-Cast: Yes
  */
@@ -31,13 +31,17 @@ public:
         
 		DisplayName = FText::FromString(TEXT("建造工厂"));
 		
-		FString DescStr = TEXT("建造工厂，提升3点GDP。<n/><n/><RichText.Yellow>定位： 经济。</><n/><n/><RichText.Red><RichText.Green><n/>四，五级城市GDP +1/+2<n/></><RichText.Green><n/>平原/高原GDP -1/-2<n/></>");
+		FString DescStr = TEXT("建造一座1×1格工厂。命令来源不限，只要工厂中心位于任意己方城市或己方工业园的工业范围内即可；施工需要180秒（约6个游戏月），完工前不提供GDP；一级工厂在平原提供7 GDP，在山地提供5 GDP。<n/><n/><RichText.Yellow>定位： 经济。</>");
         // Formatting fixes for XML/RichText
 		Description = FText::FromString(DescStr);
 
 		PreferredIndex = 5; // Row 2, Col 1
-		DefaultCooldown = 75.0f;
-		bAllowAutoCast = true;
+		DefaultCooldown = 0.0f;
+		bAllowAutoCast = false;
+		LowValueCost = 365;
+		PlacementFootprintCells = FIntPoint(1, 1);
+		PlacementPreviewMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT(
+			"/Game/Unit/Actor/Building/Economics/Factory/Common_IndustrialFactory_Workshop/SM_Common_IndustrialFactory_Workshop.SM_Common_IndustrialFactory_Workshop")));
 	}
 };
 

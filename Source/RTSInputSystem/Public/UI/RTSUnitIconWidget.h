@@ -39,9 +39,13 @@ public:
 	void SetIsActive(bool bActive);
 
 protected:
+	virtual void NativeOnInitialized() override;
 	virtual void NativeConstruct() override;
 
 	// Input Handling
+	virtual FReply NativeOnPreviewMouseButtonDown(
+		const FGeometry& InGeometry,
+		const FPointerEvent& InMouseEvent) override;
 	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 
 	// UI Bindings
@@ -75,6 +79,17 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	class UProgressBar* ShieldBar;
 
+	/** Optional dedicated production progress widgets. Legacy UMG assets fall back to ShieldBar/UnitNameText. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UProgressBar* ActivityBar;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UTextBlock* ActivityText;
+
+	/** Visible × affordance on cancellable production/research cards. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	class UTextBlock* CancelHintText;
+
 	UPROPERTY(EditAnywhere, Category = "RTS Selection|Tooltip")
 	TSubclassOf<URTSTooltipWidget> TooltipClass;
 
@@ -88,4 +103,7 @@ private:
 	void UpdateBar(class UProgressBar* Bar, float Current, float Max);
 	void UpdateTooltip(const FRTSUnitData& Data);
 	TSubclassOf<URTSTooltipWidget> ResolveTooltipClass() const;
+
+	UFUNCTION()
+	UWidget* GetOrCreateTooltipWidget();
 };

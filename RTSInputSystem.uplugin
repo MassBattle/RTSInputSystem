@@ -34,6 +34,10 @@
 		{
 			"Name": "MassGameplay",
 			"Enabled": true
+		},
+		{
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
 		}
 	],
 	"SupportURL": "https://github.com/winyunq/RTSInputSystem/issues",

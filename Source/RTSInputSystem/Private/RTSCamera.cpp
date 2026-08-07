@@ -99,6 +99,39 @@ namespace
 
 		ApplyDefaultMapRegion(OutData);
 	}
+
+	void RemoveCommandCardKeysFromCameraContext(UInputMappingContext* MappingContext)
+	{
+		if (!MappingContext)
+		{
+			return;
+		}
+
+		const FKey CommandCardKeys[] =
+		{
+			EKeys::Q, EKeys::W, EKeys::E, EKeys::R, EKeys::T,
+			EKeys::A, EKeys::S, EKeys::D, EKeys::F, EKeys::G,
+			EKeys::Z, EKeys::X, EKeys::C, EKeys::V, EKeys::B
+		};
+		TArray<TPair<const UInputAction*, FKey>> MappingsToRemove;
+
+		for (const FEnhancedActionKeyMapping& Mapping : MappingContext->GetMappings())
+		{
+			for (const FKey& CommandCardKey : CommandCardKeys)
+			{
+				if (Mapping.Action && Mapping.Key == CommandCardKey)
+				{
+					MappingsToRemove.Emplace(Mapping.Action.Get(), Mapping.Key);
+					break;
+				}
+			}
+		}
+
+		for (const TPair<const UInputAction*, FKey>& Mapping : MappingsToRemove)
+		{
+			MappingContext->UnmapKey(Mapping.Key, Mapping.Value);
+		}
+	}
 }
 
 URTSCamera::URTSCamera()
@@ -164,6 +197,7 @@ void URTSCamera::BeginPlay()
 		this->initializeMovementBoundsFromMapRegion();
 		this->configureInputModeForEdgeScrolling();
 		this->validateEnhancedInputAvailability();
+		RemoveCommandCardKeysFromCameraContext(this->inputMappingContext);
 		this->registerInputMappingContext();
 		this->bindActionCallbacks();
 	}

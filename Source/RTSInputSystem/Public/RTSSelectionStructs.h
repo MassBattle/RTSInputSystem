@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Commands/RTSTimedCommand.h"
 #include "GameplayTagContainer.h"
 #include "MassEntityTypes.h"
 #include "MassAPIStructs.h"
@@ -11,6 +12,7 @@
 
 class UTexture2D;
 class USoundBase;
+class URTSCommandButton;
 class URTSCommandGridAsset;
 
 UENUM(BlueprintType)
@@ -28,6 +30,41 @@ enum class ERTSSelectionModifier : uint8
 	Replace     UMETA(DisplayName = "Replace Selection"),
 	Add         UMETA(DisplayName = "Add to Selection"),
 	Remove      UMETA(DisplayName = "Remove from Selection")
+};
+
+/** How the current selection is written into a persistent player control group. */
+UENUM(BlueprintType)
+enum class ERTSControlGroupAssignmentMode : uint8
+{
+	Replace          UMETA(DisplayName = "Replace Group"),
+	ToggleMembership UMETA(DisplayName = "Add / Remove Selection"),
+	StealAndReplace  UMETA(DisplayName = "Steal From Other Groups And Replace")
+};
+
+/** World-wide quick-selection request used by TopSelect and reusable UMG buttons. */
+USTRUCT(BlueprintType)
+struct FRTSSelectionQuery
+{
+	GENERATED_BODY()
+
+	/** Hierarchical category. For example, Army.Ground also matches Infantry, Armor, and Artillery. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Quick Selection")
+	FGameplayTag RequiredSelectionTag;
+
+	/** Hierarchical category that must not be present. Army shortcuts use Structure here. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Quick Selection")
+	FGameplayTag ExcludedSelectionTag;
+
+	/** Only include units currently marked idle/free. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Quick Selection")
+	bool bIdleOnly = false;
+
+	/** Legacy compatibility only. Mass entities are the default and primary selection source. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Quick Selection")
+	bool bIncludeActorUnits = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Quick Selection")
+	bool bIncludeMassEntities = true;
 };
 
 /**
@@ -52,6 +89,10 @@ struct FRTSUnitData
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	FGameplayTag UnitTypeTag;
+
+	/** Hierarchical categories used by TopSelect and other world-wide quick-selection controls. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
+	FGameplayTagContainer SelectionTags;
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	FString Role;
@@ -97,6 +138,60 @@ struct FRTSUnitData
 	float Shield = 0.0f;
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	float MaxShield = 0.0f;
+
+	/** Current long-running action, such as training a unit or constructing a building. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	bool bHasActivity = false;
+
+	/**
+	 * Authoritative presentation model for all long-running commands. Multiple
+	 * active lanes and queued entries remain separate instead of being averaged.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	TArray<FRTSTimedCommandInstance> CommandProgressItems;
+
+	/** Set only on a synthesized icon representing one common progress item. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	bool bIsCommandProgressItem = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	FName CommandProgressItemId;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	bool bCanCancelCommandProgressItem = false;
+
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "RTS Selection|Activity")
+	TObjectPtr<UObject> CommandProgressActionTarget = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	FText ActivityLabel;
+
+	/** Normalized completion in the 0-1 range. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	float ActivityProgress = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	float ActivityRemainingSeconds = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	float ActivityDurationSeconds = 0.0f;
+
+	/** Total active and queued orders represented by this activity. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Activity")
+	int32 ActivityQueueCount = 0;
+
+	/** True when this selection item owns one or more production lanes. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Production")
+	bool bHasProductionCapacity = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Production")
+	int32 ProductionBusyLanes = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Production")
+	int32 ProductionTotalLanes = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection|Production")
+	int32 ProductionQueuedOrders = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	bool bIsMassEntity = false;
@@ -144,4 +239,59 @@ struct FRTSSelectionView
 	// Used for highlighting and tab-cycling
 	UPROPERTY(BlueprintReadOnly, Category = "RTS Selection")
 	FString ActiveGroupKey;
+};
+
+/** One unit-type row inside a persistent control group. */
+USTRUCT(BlueprintType)
+struct FRTSControlGroupComposition
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	FRTSUnitData UnitType;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	int32 Count = 0;
+};
+
+/** UI snapshot for one of the player's 0-9 control groups. */
+USTRUCT(BlueprintType)
+struct FRTSControlGroupView
+{
+	GENERATED_BODY()
+
+	/** The keyboard digit represented by this group (0-9). */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	int32 GroupIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	bool bAssigned = false;
+
+	/** True when the current selection exactly matches this group. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	bool bActive = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	int32 UnitCount = 0;
+
+	/** Representative type used for the compact slot portrait. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	FRTSUnitData RepresentativeUnit;
+
+	/** Per-type counts for richer StarCraft-style UMG presentation and tooltips. */
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	TArray<FRTSControlGroupComposition> Composition;
+};
+
+/** Complete control-group strip snapshot, ordered 1-9 then 0. */
+USTRUCT(BlueprintType)
+struct FRTSControlGroupsView
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	TArray<FRTSControlGroupView> Groups;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTS Control Groups")
+	int32 ActiveGroupIndex = INDEX_NONE;
 };

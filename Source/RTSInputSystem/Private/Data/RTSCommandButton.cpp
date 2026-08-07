@@ -1,5 +1,5 @@
 #include "Data/RTSCommandButton.h"
-#include "RTSCommandSubsystem.h"
+#include "RTSSelectionSubsystem.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -14,18 +14,28 @@ void URTSCommandButton::Execute_Implementation(AActor* Executor)
     UWorld* World = Executor ? Executor->GetWorld() : nullptr;
     if (!World && GEngine)
     {
+        // Mass/landmark buttons usually execute without an Actor. Prefer the
+        // live game world explicitly; choosing the editor world first makes
+        // GetFirstLocalPlayerFromController() return null and drops the click.
         for (const FWorldContext& Context : GEngine->GetWorldContexts())
         {
-            if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE || Context.WorldType == EWorldType::Editor)
+            if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
             {
                 World = Context.World();
                 break;
             }
         }
 
-        if (!World && GEngine->GetWorldContexts().Num() > 0)
+        if (!World)
         {
-            World = GEngine->GetWorldContexts()[0].World();
+            for (const FWorldContext& Context : GEngine->GetWorldContexts())
+            {
+                if (Context.WorldType == EWorldType::Editor)
+                {
+                    World = Context.World();
+                    break;
+                }
+            }
         }
     }
     if (!World)
@@ -41,9 +51,12 @@ void URTSCommandButton::Execute_Implementation(AActor* Executor)
 
     if (ULocalPlayer* LP = World->GetFirstLocalPlayerFromController())
     {
-        if (URTSCommandSubsystem* SignalHub = LP->GetSubsystem<URTSCommandSubsystem>())
+        if (URTSSelectionSubsystem* Selection = LP->GetSubsystem<URTSSelectionSubsystem>())
         {
-            SignalHub->IssueCommand(CommandTag, Executor);
+            // The selection subsystem is the shared dispatch boundary for both
+            // Mass entities and actor-backed units. Going straight to the Mass
+            // command subsystem drops instant commands for a single actor unit.
+            Selection->IssueCommand(CommandTag);
         }
     }
 }
@@ -56,4 +69,9 @@ bool URTSCommandButton::HandleAlternateClick_Implementation(UObject* WorldContex
 bool URTSCommandButton::IsAutoCastEnabledForContext_Implementation(UObject* WorldContextObject, AActor* Executor) const
 {
     return false;
+}
+
+int32 URTSCommandButton::GetQueueCountForContext_Implementation(UObject* WorldContextObject, AActor* Executor) const
+{
+	return 0;
 }

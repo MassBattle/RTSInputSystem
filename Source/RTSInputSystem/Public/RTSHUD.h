@@ -13,6 +13,25 @@ class RTSINPUTSYSTEM_API ARTSHUD : public AHUD
 
 public:
 	ARTSHUD();
+
+	/** Execute the RTS selection query without requiring an ARTSHUD instance. */
+	static void PerformScreenSelection(
+		APlayerController* PlayerController,
+		class URTSSelector* SelectorComponent,
+		const FVector2D& StartPoint,
+		const FVector2D& EndPoint,
+		float ClickThresholdSq = 1.0f);
+
+	/**
+	 * Resolves exactly one controllable selectable under a screen point.
+	 * Actor and Mass hits are depth-arbitrated so a click can never return both.
+	 */
+	static bool ResolveSingleSelectableAtScreenPosition(
+		APlayerController* PlayerController,
+		const FVector2D& ScreenPosition,
+		AActor*& OutActor,
+		struct FEntityHandle& OutEntity,
+		FVector& OutWorldLocation);
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Selection Box")
 	FLinearColor SelectionBoxColor;
 
@@ -48,7 +67,6 @@ protected:
 
 private:
 	void PerformMassSelection(TArray<struct FEntityHandle>& OutEntities);
-	int32 GetMassEntitySubtypeIndex(const struct FEntityHandle& Handle) const;
 
 	bool bIsDrawingSelectionBox;
 	bool bIsPerformingSelection;

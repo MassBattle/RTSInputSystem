@@ -11,7 +11,7 @@
 // --- Row 1: Basic SC-Style Commands ---
 
 /**
- * Move (M)
+ * Move (Q)
  */
 UCLASS()
 class RTSINPUTSYSTEM_API URTSCmd_Move : public URTSBuiltinCommandButton
@@ -30,7 +30,7 @@ public:
 };
 
 /**
- * Attack (A)
+ * Attack (T)
  */
 UCLASS()
 class RTSINPUTSYSTEM_API URTSCmd_Attack : public URTSBuiltinCommandButton
@@ -42,14 +42,14 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
 		TargetType = ERTSCommandTargetType::LocationOrTarget; // Can click ground or enemy
 		DisplayName = FText::FromString(TEXT("攻击"));
-		Description = FText::FromString(TEXT("向目标位置移动并攻击沿途敌人。<n/><n/><RichText.Yellow>快捷键: W</>"));
-		PreferredIndex = 1; // Row 1, Col 2
-		Hotkey = EKeys::W;
+		Description = FText::FromString(TEXT("向目标位置移动并攻击沿途敌人。再次按 T 可直接攻击鼠标所在位置。<n/><n/><RichText.Yellow>快捷键: T</>"));
+		PreferredIndex = 4; // Row 1, Col 5
+		Hotkey = EKeys::T;
 	}
 };
 
 /**
- * Stop (S)
+ * Stop (W)
  */
 UCLASS()
 class RTSINPUTSYSTEM_API URTSCmd_Stop : public URTSBuiltinCommandButton
@@ -61,14 +61,14 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Stop"), false);
 		TargetType = ERTSCommandTargetType::Instant;
 		DisplayName = FText::FromString(TEXT("停止"));
-		Description = FText::FromString(TEXT("立即停止当前所有行动。<n/><n/><RichText.Yellow>快捷键: E</>"));
-		PreferredIndex = 2; // Row 1, Col 3
-		Hotkey = EKeys::E;
+		Description = FText::FromString(TEXT("立即停止当前所有行动。<n/><n/><RichText.Yellow>快捷键: W</>"));
+		PreferredIndex = 1; // Row 1, Col 2
+		Hotkey = EKeys::W;
 	}
 };
 
 /**
- * Hold Position (H)
+ * Hold Position (E)
  */
 UCLASS()
 class RTSINPUTSYSTEM_API URTSCmd_HoldPosition : public URTSBuiltinCommandButton
@@ -80,14 +80,14 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Hold"), false);
 		TargetType = ERTSCommandTargetType::Instant;
 		DisplayName = FText::FromString(TEXT("驻守"));
-		Description = FText::FromString(TEXT("坚守阵地，不追击敌人。<n/><n/><RichText.Yellow>快捷键: R</>"));
-		PreferredIndex = 3; // Row 1, Col 4
-		Hotkey = EKeys::R;
+		Description = FText::FromString(TEXT("坚守阵地，不追击敌人。<n/><n/><RichText.Yellow>快捷键: E</>"));
+		PreferredIndex = 2; // Row 1, Col 3
+		Hotkey = EKeys::E;
 	}
 };
 
 /**
- * Patrol (P)
+ * Patrol (R)
  */
 UCLASS()
 class RTSINPUTSYSTEM_API URTSCmd_Patrol : public URTSBuiltinCommandButton
@@ -99,9 +99,9 @@ public:
 		CommandTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Patrol"), false);
 		TargetType = ERTSCommandTargetType::Location;
 		DisplayName = FText::FromString(TEXT("巡逻"));
-		Description = FText::FromString(TEXT("在当前位置和目标位置之间巡逻。<n/><n/><RichText.Yellow>快捷键: T</>"));
-		PreferredIndex = 4; // Row 1, Col 5
-		Hotkey = EKeys::T;
+		Description = FText::FromString(TEXT("在当前位置和目标位置之间巡逻。<n/><n/><RichText.Yellow>快捷键: R</>"));
+		PreferredIndex = 3; // Row 1, Col 4
+		Hotkey = EKeys::R;
 	}
 };
 
@@ -120,10 +120,10 @@ public:
         TArray<URTSCommandButton*> Result;
         
         Result.Add(NewObject<URTSCmd_Move>());
-        Result.Add(NewObject<URTSCmd_Attack>());
         Result.Add(NewObject<URTSCmd_Stop>());
         Result.Add(NewObject<URTSCmd_HoldPosition>());
         Result.Add(NewObject<URTSCmd_Patrol>());
+        Result.Add(NewObject<URTSCmd_Attack>());
 
         return Result;
     }

@@ -8,7 +8,10 @@
 #include "Data/RTSCommandGridAsset.h"
 #include "RTSCommandButtonWidget.h"
 #include "RTSActiveGroupWidget.h" 
+#include "TimerManager.h"
 #include "RTSCommanderGridWidget.generated.h"
+
+class URTSSelector;
 
 /**
  * The 3x5 Grid Container.
@@ -84,8 +87,17 @@ protected:
     void RefreshVisuals();
 
 	void RegisterCommandPanelHotkeys();
+	void RebuildCommandPanelHotkeys();
 	void UnregisterCommandPanelHotkeys();
 	void ExecuteCommandPanelSlot(int32 SlotIndex);
+	void HandleCommandPanelHotkeyPressed(int32 SlotIndex, const FKey& Hotkey);
+	void HandleCommandPanelHotkeyReleased(const FKey& Hotkey);
+	void BeginHeldCommandHotkeyRepeat();
+	void RepeatHeldCommandHotkey();
+	void StopHeldCommandHotkeyRepeat();
+	void ConfirmPendingTargetWithHotkey(URTSSelector* Selector, const FKey& Hotkey, bool bRapidFire = false);
+	void UpdateCommandStateVisuals();
+	void PositionSharedTooltip();
 
     // Cache the active actor for context
     TWeakObjectPtr<AActor> ActiveActorPtr;
@@ -94,6 +106,9 @@ protected:
 	TObjectPtr<class UInputComponent> CommandPanelInputComponent;
 
 	TWeakObjectPtr<APlayerController> CommandPanelInputOwner;
+	FKey HeldCommandHotkey;
+	int32 HeldCommandSlotIndex = INDEX_NONE;
+	FTimerHandle CommandHotkeyRepeatTimer;
 
     /** 当前正在显示的网格资产 (托管状态) */
     UPROPERTY()
@@ -135,5 +150,10 @@ public:
     void NotifyButtonHovered(URTSCommandButtonWidget* Btn, URTSCommandButton* Data);
     void NotifyButtonUnhovered(URTSCommandButtonWidget* Btn);
 
-    virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+	/** The left activity panel uses the same visual button class, not this grid's widget instances. */
+	TSubclassOf<URTSCommandButtonWidget> GetCommandButtonWidgetClass() const
+	{
+		return ButtonParams;
+	}
+
 };

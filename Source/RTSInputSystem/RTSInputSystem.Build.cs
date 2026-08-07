@@ -25,10 +25,14 @@ public class RTSInputSystem : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"DeveloperSettings",
 				"Engine",
+				"AIModule",
+				"EnhancedInput",
 				"GameplayTags",
 				"InputCore",
 				"MassAPI",
+				"MassBattle",
 				"MassEntity",
 				"SlateCore",
 				"UMG"
@@ -38,9 +42,12 @@ public class RTSInputSystem : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new[]
 			{
-				"EnhancedInput",
+				"FlowFieldCanvas",
 				"Slate",
-				"MassBattle"
+				"ProceduralMeshComponent",
+				"Projects",
+				"RenderCore",
+				"RHI"
 			}
 		);
 

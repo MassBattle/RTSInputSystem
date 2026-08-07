@@ -1,16 +1,193 @@
 #include "RTSHUD.h"
 #include "RTSSelectionSubsystem.h"
 #include "RTSSelectable.h"
+#include "RTSInputPanelSettings.h"
 #include "FuncLibs/MassBattleFuncLib.h"
 #include "RTSSelector.h"
 #include "Engine/Canvas.h"
 #include "Interfaces/RTSCommandInterface.h"
 #include "Data/RTSCommandGridAsset.h"
 #include "Engine/Texture2D.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
-#include "MassEntitySubsystem.h"
-#include "MassEntityManager.h"
-#include "Fragments/SubType.h"
+
+bool ARTSHUD::ResolveSingleSelectableAtScreenPosition(
+	APlayerController* PlayerController,
+	const FVector2D& ScreenPosition,
+	AActor*& OutActor,
+	FEntityHandle& OutEntity,
+	FVector& OutWorldLocation)
+{
+	OutActor = nullptr;
+	OutEntity.Reset();
+	OutWorldLocation = FVector::ZeroVector;
+	if (!PlayerController || !PlayerController->PlayerCameraManager)
+	{
+		return false;
+	}
+
+	UWorld* World = PlayerController->GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	URTSSelectionSubsystem* SelectionSubsystem = nullptr;
+	if (const ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
+	{
+		SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>();
+	}
+
+	const FVector CameraLocation =
+		PlayerController->PlayerCameraManager->GetCameraLocation();
+	float ActorDistanceSq = TNumericLimits<float>::Max();
+	FVector RayOrigin = FVector::ZeroVector;
+	FVector RayDirection = FVector::ForwardVector;
+	if (PlayerController->DeprojectScreenPositionToWorld(
+		ScreenPosition.X,
+		ScreenPosition.Y,
+		RayOrigin,
+		RayDirection))
+	{
+		const FVector RayEnd = RayOrigin + RayDirection * 1000000.0f;
+		FCollisionQueryParams QueryParams(
+			SCENE_QUERY_STAT(RTSSingleSelectionActor),
+			true);
+		TArray<FHitResult> ActorHits;
+		World->LineTraceMultiByChannel(
+			ActorHits,
+			RayOrigin,
+			RayEnd,
+			ECC_Visibility,
+			QueryParams);
+		for (const FHitResult& Hit : ActorHits)
+		{
+			AActor* Candidate = Hit.GetActor();
+			for (int32 ParentDepth = 0;
+				Candidate && ParentDepth < 4;
+				++ParentDepth)
+			{
+				if (Candidate->FindComponentByClass<URTSSelectable>())
+				{
+					break;
+				}
+				Candidate = Candidate->GetAttachParentActor();
+			}
+
+			if (!Candidate
+				|| !Candidate->FindComponentByClass<URTSSelectable>()
+				|| (SelectionSubsystem
+					&& !SelectionSubsystem->IsActorControllable(Candidate)))
+			{
+				continue;
+			}
+
+			const float CandidateDistanceSq =
+				FVector::DistSquared(CameraLocation, Hit.ImpactPoint);
+			if (CandidateDistanceSq < ActorDistanceSq)
+			{
+				OutActor = Candidate;
+				OutWorldLocation = Hit.ImpactPoint;
+				ActorDistanceSq = CandidateDistanceSq;
+			}
+		}
+	}
+
+	FEntityHandle MassCandidate;
+	FVector MassLocation = FVector::ZeroVector;
+	float MassDistanceSq = TNumericLimits<float>::Max();
+	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+	const float HalfSize = FMath::Clamp(
+		Settings ? Settings->SelectionClickHalfSizePixels : 3.0f,
+		1.0f,
+		12.0f);
+	const FVector2D ScreenPoints[4] =
+	{
+		ScreenPosition + FVector2D(-HalfSize, -HalfSize),
+		ScreenPosition + FVector2D(-HalfSize, HalfSize),
+		ScreenPosition + FVector2D(HalfSize, HalfSize),
+		ScreenPosition + FVector2D(HalfSize, -HalfSize)
+	};
+
+	FViewTracePoints TracePoints;
+	TracePoints.ViewPoint = CameraLocation;
+	for (const FVector2D& Point : ScreenPoints)
+	{
+		FVector WorldPosition = FVector::ZeroVector;
+		FVector WorldDirection = FVector::ForwardVector;
+		if (PlayerController->DeprojectScreenPositionToWorld(
+			Point.X,
+			Point.Y,
+			WorldPosition,
+			WorldDirection))
+		{
+			TracePoints.SelectionPoints.Add(
+				WorldPosition + WorldDirection * 100000.0f);
+		}
+	}
+
+	if (TracePoints.SelectionPoints.Num() == 4)
+	{
+		bool bHitMass = false;
+		TArray<FTraceResult> Results;
+#if WITH_EDITOR
+		FTraceDrawDebugConfig DebugConfig;
+		DebugConfig.bDrawDebugShape = false;
+		DebugConfig.Duration = 0.0f;
+		UMassBattleFuncLib::ViewTraceForAgents(
+			PlayerController,
+			bHitMass,
+			Results,
+			1,
+			TracePoints,
+			false,
+			FVector::ZeroVector,
+			1.0f,
+			ESortMode::NearToFar,
+			CameraLocation,
+			FEntityArray(),
+			FMassBattleQuery(),
+			DebugConfig);
+#else
+		UMassBattleFuncLib::ViewTraceForAgents(
+			PlayerController,
+			bHitMass,
+			Results,
+			1,
+			TracePoints,
+			false,
+			FVector::ZeroVector,
+			1.0f,
+			ESortMode::NearToFar,
+			CameraLocation);
+#endif
+		if (bHitMass && !Results.IsEmpty())
+		{
+			const FTraceResult& Result = Results[0];
+			if (!SelectionSubsystem
+				|| SelectionSubsystem->IsEntityControllable(Result.Entity))
+			{
+				MassCandidate = Result.Entity;
+				MassLocation = Result.EntityLocation;
+				MassDistanceSq =
+					FVector::DistSquared(CameraLocation, MassLocation);
+			}
+		}
+	}
+
+	if (MassCandidate.IsSet() && MassDistanceSq < ActorDistanceSq)
+	{
+		OutActor = nullptr;
+		OutEntity = MassCandidate;
+		OutWorldLocation = MassLocation;
+	}
+	else if (OutActor)
+	{
+		OutEntity.Reset();
+	}
+
+	return OutActor != nullptr || OutEntity.IsSet();
+}
 
 // Constructor implementation: Initializes default values.
 ARTSHUD::ARTSHUD()
@@ -68,6 +245,8 @@ void ARTSHUD::UpdateSelection(const FVector2D& EndPoint)
 void ARTSHUD::EndSelection()
 {
 	bIsDrawingSelectionBox = false;
+	// AHUD's Canvas is valid only while DrawHUD is running. Defer the
+	// projection-based selection pass to the next DrawHUD invocation.
 	bIsPerformingSelection = true;
 }
 
@@ -98,18 +277,6 @@ void ARTSHUD::DrawSelectionBox_Implementation(const FVector2D& StartPoint, const
 		Canvas->K2_DrawLine(BottomRight, BottomLeft, SelectionBoxThickness, SelectionBoxColor);
 		Canvas->K2_DrawLine(BottomLeft, TopLeft, SelectionBoxThickness, SelectionBoxColor);
 
-		const float CornerLength = FMath::Clamp(FMath::Min(Width, Height) * 0.18f, 10.0f, 32.0f);
-		const float CornerThickness = SelectionBoxThickness + 1.0f;
-		const FLinearColor CornerColor(0.55f, 0.95f, 1.0f, 1.0f);
-
-		Canvas->K2_DrawLine(TopLeft, TopLeft + FVector2D(CornerLength, 0.0f), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(TopLeft, TopLeft + FVector2D(0.0f, CornerLength), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(TopRight, TopRight + FVector2D(-CornerLength, 0.0f), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(TopRight, TopRight + FVector2D(0.0f, CornerLength), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(BottomRight, BottomRight + FVector2D(-CornerLength, 0.0f), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(BottomRight, BottomRight + FVector2D(0.0f, -CornerLength), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(BottomLeft, BottomLeft + FVector2D(CornerLength, 0.0f), CornerThickness, CornerColor);
-		Canvas->K2_DrawLine(BottomLeft, BottomLeft + FVector2D(0.0f, -CornerLength), CornerThickness, CornerColor);
 	}
 }
 
@@ -121,6 +288,7 @@ void ARTSHUD::PerformSelection_Implementation()
 	// 1. Prepare
 	ERTSSelectionModifier Modifier = ERTSSelectionModifier::Replace;
     float DragDistSq = FVector2D::DistSquared(SelectionStart, SelectionEnd);
+	const bool bIsClick = DragDistSq <= MinSelectionSizeSq;
 
 	URTSSelectionSubsystem* SelectionSubsystem = nullptr;
     URTSSelector* SelectorComponent = nullptr;
@@ -145,19 +313,47 @@ void ARTSHUD::PerformSelection_Implementation()
 
     // 2. SEARCH (Direct & Concurrent)
     
-    // A. Actor Path (The primary way to select anything, including Cities now)
-    TArray<AActor*> RawActors;
-    GetActorsInSelectionRectangle<AActor>(SelectionStart, SelectionEnd, RawActors, false, false);
-    for (AActor* Actor : RawActors)
-    {
-        if (Actor && Actor->FindComponentByClass<URTSSelectable>())
-        {
-            FinalActorSelection.AddUnique(Actor);
-        }
-    }
-
-    // B. Entity Path (Soldiers - Mass Battle Standard)
-    PerformMassSelection(FinalMassSelection);
+	if (bIsClick)
+	{
+		AActor* ClickedActor = nullptr;
+		FEntityHandle ClickedEntity;
+		FVector ClickedLocation = FVector::ZeroVector;
+		if (ResolveSingleSelectableAtScreenPosition(
+			PC,
+			SelectionEnd,
+			ClickedActor,
+			ClickedEntity,
+			ClickedLocation))
+		{
+			if (ClickedActor)
+			{
+				FinalActorSelection.Add(ClickedActor);
+			}
+			else if (ClickedEntity.IsSet())
+			{
+				FinalMassSelection.Add(ClickedEntity);
+			}
+		}
+	}
+	else
+	{
+		// Actor and Mass paths may both contribute only to a real marquee.
+		TArray<AActor*> RawActors;
+		GetActorsInSelectionRectangle<AActor>(
+			SelectionStart,
+			SelectionEnd,
+			RawActors,
+			false,
+			false);
+		for (AActor* Actor : RawActors)
+		{
+			if (Actor && Actor->FindComponentByClass<URTSSelectable>())
+			{
+				FinalActorSelection.AddUnique(Actor);
+			}
+		}
+		PerformMassSelection(FinalMassSelection);
+	}
 
 	// 5. Toggle Logic (Shift + Single Click = Deselect)
 	// ONLY apply toggle if this was a Click (not a Box Drag).
@@ -167,7 +363,7 @@ void ARTSHUD::PerformSelection_Implementation()
 	{
 		UE_LOG(LogTemp, Log, TEXT("RTSHUD: Shift Action - DragDistSq: %f (Threshold: %f)"), DragDistSq, MinSelectionSizeSq);
 		
-		if (DragDistSq <= MinSelectionSizeSq)
+		if (bIsClick)
 		{
 			// Case A: Single Actor Toggle
 			if (FinalActorSelection.Num() == 1 && FinalMassSelection.Num() == 0)
@@ -185,83 +381,6 @@ void ARTSHUD::PerformSelection_Implementation()
 				{
 					Modifier = ERTSSelectionModifier::Remove;
 					UE_LOG(LogTemp, Log, TEXT("RTSHUD: Toggling Single Entity OFF (Remove)."));
-				}
-			}
-		}
-	}
-
-	// 5. Ctrl + Click (Select All of Same Type On Screen)
-	if (PC && (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::RightControl)))
-	{
-		// Only apply if it was a Click (not a Box Drag)
-		if (DragDistSq <= MinSelectionSizeSq)
-		{
-			// Strategy: If we clicked a single unit, find all matching units on screen.
-			
-			// 1. Actor Group Selection
-			if (FinalActorSelection.Num() == 1)
-			{
-				AActor* TemplateActor = FinalActorSelection[0];
-				if (TemplateActor)
-				{
-					UClass* MatchClass = TemplateActor->GetClass();
-					
-					// Get Viewport Size
-					int32 ViewportX, ViewportY;
-					PC->GetViewportSize(ViewportX, ViewportY);
-					
-					// Select All in Viewport
-					TArray<AActor*> AllScreenActors;
-					GetActorsInSelectionRectangle<AActor>(FVector2D(0,0), FVector2D(ViewportX, ViewportY), AllScreenActors, false, false);
-					
-					// Filter by Class
-					FinalActorSelection.Reset();
-					for(AActor* Act : AllScreenActors)
-					{
-						if (Act && Act->GetClass() == MatchClass && Act->FindComponentByClass<URTSSelectable>())
-						{
-							FinalActorSelection.Add(Act);
-						}
-					}
-					
-					// Force Replace Mode for Group Select
-					Modifier = ERTSSelectionModifier::Replace;
-					// Clear Mass (prioritize Actor group)
-					FinalMassSelection.Reset();
-				}
-			}
-			// 2. Mass Entity Group Selection
-			else if (FinalMassSelection.Num() > 0)
-			{
-				const int32 MatchSubType = GetMassEntitySubtypeIndex(FinalMassSelection[0]);
-				if (MatchSubType != INDEX_NONE)
-				{
-					int32 ViewportX = 0;
-					int32 ViewportY = 0;
-					PC->GetViewportSize(ViewportX, ViewportY);
-
-					const FVector2D SavedStart = SelectionStart;
-					const FVector2D SavedEnd = SelectionEnd;
-					SelectionStart = FVector2D(0.0f, 0.0f);
-					SelectionEnd = FVector2D(ViewportX, ViewportY);
-
-					TArray<FEntityHandle> AllScreenMass;
-					PerformMassSelection(AllScreenMass);
-
-					SelectionStart = SavedStart;
-					SelectionEnd = SavedEnd;
-
-					FinalMassSelection.Reset();
-					for (const FEntityHandle& Handle : AllScreenMass)
-					{
-						if (GetMassEntitySubtypeIndex(Handle) == MatchSubType)
-						{
-							FinalMassSelection.AddUnique(Handle);
-						}
-					}
-
-					Modifier = ERTSSelectionModifier::Replace;
-					FinalActorSelection.Reset();
 				}
 			}
 		}
@@ -309,6 +428,12 @@ void ARTSHUD::PerformMassSelection(TArray<FEntityHandle>& OutEntities)
 	
 	APlayerController* PC = GetOwningPlayerController();
 	if (!PC || !PC->PlayerCameraManager) return;
+
+	URTSSelectionSubsystem* SelectionSubsystem = nullptr;
+	if (const ULocalPlayer* LocalPlayer = PC->GetLocalPlayer())
+	{
+		SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>();
+	}
 
 	// Calculate selection box bounds
 	float MinX = FMath::Min(SelectionStart.X, SelectionEnd.X);
@@ -379,37 +504,245 @@ void ARTSHUD::PerformMassSelection(TArray<FEntityHandle>& OutEntities)
 		{
 			for (const FTraceResult& Result : Results)
 			{
-				OutEntities.Add(Result.Entity);
+				if (!SelectionSubsystem || SelectionSubsystem->IsEntityControllable(Result.Entity))
+				{
+					OutEntities.Add(Result.Entity);
+				}
 			}
 		}
 	}
 }
 
-int32 ARTSHUD::GetMassEntitySubtypeIndex(const FEntityHandle& Handle) const
+void ARTSHUD::PerformScreenSelection(
+	APlayerController* PlayerController,
+	URTSSelector* SelectorComponent,
+	const FVector2D& StartPoint,
+	const FVector2D& EndPoint,
+	float ClickThresholdSq)
 {
-	if (Handle.Index == 0)
+	if (!PlayerController || !PlayerController->PlayerCameraManager)
 	{
-		return INDEX_NONE;
+		return;
 	}
 
-	UWorld* World = GetWorld();
-	if (!World)
+	ClickThresholdSq = FMath::Max(0.0f, ClickThresholdSq);
+	if (!SelectorComponent)
 	{
-		return INDEX_NONE;
+		SelectorComponent = PlayerController->FindComponentByClass<URTSSelector>();
 	}
 
-	if (UMassEntitySubsystem* MassSys = World->GetSubsystem<UMassEntitySubsystem>())
+	URTSSelectionSubsystem* SelectionSubsystem = nullptr;
+	if (const ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
 	{
-		FMassEntityManager& EntityManager = MassSys->GetMutableEntityManager();
-		const FMassEntityHandle NativeHandle(Handle.Index, Handle.Serial);
-		if (EntityManager.IsEntityActive(NativeHandle))
+		SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>();
+	}
+
+	auto CollectSelectableActors = [PlayerController](
+		const FVector2D& RectStart,
+		const FVector2D& RectEnd,
+		TArray<AActor*>& OutActors)
+	{
+		OutActors.Reset();
+		TArray<AActor*> RawActors;
+
+		// This helper can be called from input events, where AHUD::Canvas is not
+		// valid. Project through the player controller instead of calling the
+		// Canvas-backed AHUD::GetActorsInSelectionRectangle API.
+		if (UWorld* World = PlayerController->GetWorld())
 		{
-			if (const FSubType* SubType = EntityManager.GetFragmentDataPtr<FSubType>(NativeHandle))
+			FBox2D SelectionRectangle(ForceInit);
+			SelectionRectangle += RectStart;
+			SelectionRectangle += RectEnd;
+
+			static const FVector BoundsPointMapping[8] =
 			{
-				return SubType->Index;
+				FVector(1.0f, 1.0f, 1.0f), FVector(1.0f, 1.0f, -1.0f),
+				FVector(1.0f, -1.0f, 1.0f), FVector(1.0f, -1.0f, -1.0f),
+				FVector(-1.0f, 1.0f, 1.0f), FVector(-1.0f, 1.0f, -1.0f),
+				FVector(-1.0f, -1.0f, 1.0f), FVector(-1.0f, -1.0f, -1.0f)
+			};
+
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				AActor* Actor = *It;
+				if (!Actor || !Actor->FindComponentByClass<URTSSelectable>())
+				{
+					continue;
+				}
+
+				const FBox ActorBounds = Actor->GetComponentsBoundingBox(false);
+				if (!ActorBounds.IsValid)
+				{
+					continue;
+				}
+
+				const FVector Center = ActorBounds.GetCenter();
+				const FVector Extent = ActorBounds.GetExtent();
+				FBox2D ActorScreenBounds(ForceInit);
+				for (const FVector& PointMapping : BoundsPointMapping)
+				{
+					FVector2D ScreenPoint;
+					if (PlayerController->ProjectWorldLocationToScreen(Center + PointMapping * Extent, ScreenPoint, false))
+					{
+						ActorScreenBounds += ScreenPoint;
+					}
+				}
+
+				if (ActorScreenBounds.bIsValid && SelectionRectangle.Intersect(ActorScreenBounds))
+				{
+					RawActors.Add(Actor);
+				}
+			}
+		}
+
+		for (AActor* Actor : RawActors)
+		{
+			if (Actor && Actor->FindComponentByClass<URTSSelectable>())
+			{
+				OutActors.AddUnique(Actor);
+			}
+		}
+	};
+
+	auto CollectMassEntities = [PlayerController, SelectionSubsystem, ClickThresholdSq](
+		const FVector2D& RectStart,
+		const FVector2D& RectEnd,
+		TArray<FEntityHandle>& OutEntities)
+	{
+		OutEntities.Reset();
+		float MinX = FMath::Min(RectStart.X, RectEnd.X);
+		float MinY = FMath::Min(RectStart.Y, RectEnd.Y);
+		float MaxX = FMath::Max(RectStart.X, RectEnd.X);
+		float MaxY = FMath::Max(RectStart.Y, RectEnd.Y);
+		const float Width = MaxX - MinX;
+		const float Height = MaxY - MinY;
+		const bool bIsClick = Width * Width + Height * Height < ClickThresholdSq;
+		if (bIsClick)
+		{
+			MinX -= 1.0f;
+			MinY -= 1.0f;
+			MaxX += 1.0f;
+			MaxY += 1.0f;
+		}
+
+		const FVector2D ScreenPoints[4] =
+		{
+			FVector2D(MinX, MinY),
+			FVector2D(MinX, MaxY),
+			FVector2D(MaxX, MaxY),
+			FVector2D(MaxX, MinY)
+		};
+
+		FViewTracePoints TracePoints;
+		TracePoints.ViewPoint = PlayerController->PlayerCameraManager->GetCameraLocation();
+		for (const FVector2D& ScreenPoint : ScreenPoints)
+		{
+			FVector WorldPosition;
+			FVector WorldDirection;
+			if (PlayerController->DeprojectScreenPositionToWorld(
+				ScreenPoint.X, ScreenPoint.Y, WorldPosition, WorldDirection))
+			{
+				TracePoints.SelectionPoints.Add(WorldPosition + WorldDirection * 100000.0f);
+			}
+		}
+
+		if (TracePoints.SelectionPoints.Num() != 4)
+		{
+			return;
+		}
+
+		bool bHit = false;
+		TArray<FTraceResult> Results;
+		const int32 KeepCount = bIsClick ? 1 : -1;
+		const ESortMode SortMode = bIsClick ? ESortMode::NearToFar : ESortMode::None;
+#if WITH_EDITOR
+		FTraceDrawDebugConfig DebugConfig;
+		DebugConfig.bDrawDebugShape = false;
+		DebugConfig.Duration = 1.0f;
+		UMassBattleFuncLib::ViewTraceForAgents(
+			PlayerController, bHit, Results, KeepCount, TracePoints, false, FVector::ZeroVector,
+			1.0f, SortMode, FVector::ZeroVector, FEntityArray(), FMassBattleQuery(), DebugConfig);
+#else
+		UMassBattleFuncLib::ViewTraceForAgents(
+			PlayerController, bHit, Results, KeepCount, TracePoints, false, FVector::ZeroVector,
+			1.0f, SortMode);
+#endif
+
+		if (bHit)
+		{
+			for (const FTraceResult& Result : Results)
+			{
+				if (!SelectionSubsystem || SelectionSubsystem->IsEntityControllable(Result.Entity))
+				{
+					OutEntities.AddUnique(Result.Entity);
+				}
+			}
+		}
+	};
+
+	ERTSSelectionModifier Modifier = ERTSSelectionModifier::Replace;
+	const float DragDistanceSq = FVector2D::DistSquared(StartPoint, EndPoint);
+	const bool bIsClick = DragDistanceSq <= ClickThresholdSq;
+	if (PlayerController->IsInputKeyDown(EKeys::LeftShift)
+		|| PlayerController->IsInputKeyDown(EKeys::RightShift))
+	{
+		Modifier = ERTSSelectionModifier::Add;
+	}
+
+	TArray<AActor*> FinalActorSelection;
+	TArray<FEntityHandle> FinalMassSelection;
+	if (bIsClick)
+	{
+		AActor* ClickedActor = nullptr;
+		FEntityHandle ClickedEntity;
+		FVector ClickedLocation = FVector::ZeroVector;
+		if (ResolveSingleSelectableAtScreenPosition(
+			PlayerController,
+			EndPoint,
+			ClickedActor,
+			ClickedEntity,
+			ClickedLocation))
+		{
+			if (ClickedActor)
+			{
+				FinalActorSelection.Add(ClickedActor);
+			}
+			else if (ClickedEntity.IsSet())
+			{
+				FinalMassSelection.Add(ClickedEntity);
 			}
 		}
 	}
+	else
+	{
+		CollectSelectableActors(StartPoint, EndPoint, FinalActorSelection);
+		CollectMassEntities(StartPoint, EndPoint, FinalMassSelection);
+	}
 
-	return INDEX_NONE;
+	if (Modifier == ERTSSelectionModifier::Add && SelectionSubsystem && bIsClick)
+	{
+		if (FinalActorSelection.Num() == 1 && FinalMassSelection.IsEmpty()
+			&& SelectionSubsystem->IsActorSelected(FinalActorSelection[0]))
+		{
+			Modifier = ERTSSelectionModifier::Remove;
+		}
+		else if (FinalActorSelection.IsEmpty() && FinalMassSelection.Num() == 1
+			&& SelectionSubsystem->IsEntitySelected(FinalMassSelection[0]))
+		{
+			Modifier = ERTSSelectionModifier::Remove;
+		}
+	}
+
+	if (SelectionSubsystem)
+	{
+		SelectionSubsystem->SetSelectedUnits(FinalActorSelection, FinalMassSelection, Modifier);
+	}
+
+	if (SelectorComponent)
+	{
+		const TArray<AActor*>& VisualActors = SelectionSubsystem
+			? SelectionSubsystem->GetSelectedActors()
+			: FinalActorSelection;
+		SelectorComponent->HandleSelectedActors(VisualActors);
+	}
 }

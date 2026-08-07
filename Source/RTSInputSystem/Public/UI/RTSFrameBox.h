@@ -143,8 +143,16 @@ private:
 	TSharedPtr<SBorder> InnerBorder;
 	TSharedPtr<SBorder> FillBorder;
 
+	// FSlateBrush owns the synchronously loaded material through ResourceObject.
+	// These must be reflected so GC visits that nested UObject reference while
+	// Slate keeps the brush alive across long gameplay sessions.
+	UPROPERTY(Transient)
 	FSlateBrush OuterBrush;
+
+	UPROPERTY(Transient)
 	FSlateBrush InnerBrush;
+
+	UPROPERTY(Transient)
 	FSlateBrush FillBrush;
 
 	void RebuildBrushes();

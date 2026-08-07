@@ -1,6 +1,7 @@
 #include "UI/RTSUnitIconWidget.h"
 #include "RTSSelectionSubsystem.h"
 #include "UI/RTSTooltipWidget.h"
+#include "Interfaces/RTSCommandProgressController.h"
 #include "Components/Image.h"
 #include "Components/OverlaySlot.h"
 #include "Components/ProgressBar.h"
@@ -13,6 +14,35 @@ namespace
 	FString GetUnitIconGroupKey(const FRTSUnitData& Data)
 	{
 		return Data.GroupKey.IsEmpty() ? Data.Name : Data.GroupKey;
+	}
+
+	FString BuildUnitProductionLine(const FRTSUnitData& Data)
+	{
+		TArray<FString> Parts;
+		if (Data.bHasProductionCapacity)
+		{
+			Parts.Add(FString::Printf(TEXT("产能 %d/%d"),
+				Data.ProductionBusyLanes,
+				Data.ProductionTotalLanes));
+			if (Data.ProductionQueuedOrders > 0)
+			{
+				Parts.Add(FString::Printf(TEXT("等待 %d"), Data.ProductionQueuedOrders));
+			}
+		}
+		if (Data.bHasActivity)
+		{
+			FString Activity = Data.ActivityLabel.ToString();
+			if (Data.ActivityRemainingSeconds > 0.0f)
+			{
+				Activity += FString::Printf(TEXT(" %.1fs"), Data.ActivityRemainingSeconds);
+			}
+			if (Data.ActivityQueueCount > 1)
+			{
+				Activity += FString::Printf(TEXT(" 队列%d"), Data.ActivityQueueCount);
+			}
+			Parts.Add(MoveTemp(Activity));
+		}
+		return FString::Join(Parts, TEXT(" · "));
 	}
 
 	FString BuildUnitTooltipDescription(const FRTSUnitData& Data)
@@ -39,9 +69,23 @@ namespace
 		{
 			Lines.Add(FString::Printf(TEXT("护盾: <RichText.Green>%.0f / %.0f</>"), Data.Shield, Data.MaxShield));
 		}
+		const FString ProductionLine = BuildUnitProductionLine(Data);
+		if (!ProductionLine.IsEmpty())
+		{
+			Lines.Add(FString::Printf(TEXT("<RichText.Yellow>%s</>"), *ProductionLine));
+		}
 
 		return FString::Join(Lines, TEXT("<n/>"));
 	}
+}
+
+void URTSUnitIconWidget::NativeOnInitialized()
+{
+	Super::NativeOnInitialized();
+
+	// Slate asks for the rich tooltip only when it is about to open. This keeps
+	// tooltip Blueprint loading and widget construction out of selection frames.
+	ToolTipWidgetDelegate.BindDynamic(this, &URTSUnitIconWidget::GetOrCreateTooltipWidget);
 }
 
 void URTSUnitIconWidget::NativeConstruct()
@@ -70,7 +114,11 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 	{
 		if (UnitSlotFrame)
 		{
-			UnitSlotFrame->SetVisibility(ESlateVisibility::Hidden);
+			const bool bShowCommandFrame = Data.bIsCommandProgressItem;
+			UnitSlotFrame->SetRenderOpacity(bShowCommandFrame ? 1.0f : 0.0f);
+			UnitSlotFrame->SetVisibility(bShowCommandFrame
+				? ESlateVisibility::HitTestInvisible
+				: ESlateVisibility::Hidden);
 		}
 
 		if (UOverlaySlot* IconSlot = Cast<UOverlaySlot>(UnitIcon->Slot))
@@ -108,12 +156,23 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 		}
 	}
 
+	UProgressBar* EffectiveActivityBar = ActivityBar;
+	if (!EffectiveActivityBar && Data.MaxShield <= 0.0f)
+	{
+		// Existing Unit.uasset predates ActivityBar.  Reuse its otherwise-unused
+		// shield strip so production progress is visible without an asset migration.
+		EffectiveActivityBar = ShieldBar;
+	}
+
 	// Update Status Bars
 	if (bShowBars)
 	{
 		UpdateBar(HealthBar, Data.Health, Data.MaxHealth);
 		UpdateBar(EnergyBar, Data.Energy, Data.MaxEnergy);
-		UpdateBar(ShieldBar, Data.Shield, Data.MaxShield);
+		if (ShieldBar != EffectiveActivityBar)
+		{
+			UpdateBar(ShieldBar, Data.Shield, Data.MaxShield);
+		}
 	}
 	else
 	{
@@ -122,9 +181,39 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 		if(ShieldBar) ShieldBar->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
+	if (EffectiveActivityBar)
+	{
+		EffectiveActivityBar->SetPercent(FMath::Clamp(Data.ActivityProgress, 0.0f, 1.0f));
+		EffectiveActivityBar->SetVisibility(Data.bHasActivity
+			? ESlateVisibility::HitTestInvisible
+			: ESlateVisibility::Collapsed);
+	}
+
+	const FString ProductionLine = BuildUnitProductionLine(Data);
+	if (ActivityText)
+	{
+		ActivityText->SetText(FText::FromString(ProductionLine));
+		ActivityText->SetVisibility(ProductionLine.IsEmpty()
+			? ESlateVisibility::Collapsed
+			: ESlateVisibility::HitTestInvisible);
+	}
+
+	if (CancelHintText)
+	{
+		const bool bShowCancel =
+			Data.bIsCommandProgressItem
+			&& Data.bCanCancelCommandProgressItem;
+		CancelHintText->SetVisibility(bShowCancel
+			? ESlateVisibility::HitTestInvisible
+			: ESlateVisibility::Collapsed);
+	}
+
 	if (UnitNameText)
 	{
-		UnitNameText->SetText(FText::FromString(Data.Name));
+		const FString VisibleName = !ActivityText && !ProductionLine.IsEmpty()
+			? FString::Printf(TEXT("%s\n%s"), *Data.Name, *ProductionLine)
+			: Data.Name;
+		UnitNameText->SetText(FText::FromString(VisibleName));
 		UnitNameText->SetVisibility(Data.Name.IsEmpty()
 			? ESlateVisibility::Collapsed
 			: ESlateVisibility::HitTestInvisible);
@@ -195,40 +284,63 @@ TSubclassOf<URTSTooltipWidget> URTSUnitIconWidget::ResolveTooltipClass() const
 
 void URTSUnitIconWidget::UpdateTooltip(const FRTSUnitData& Data)
 {
-	SetToolTip(nullptr);
-	UnitTooltipWidget = nullptr;
-
-	if (TSubclassOf<URTSTooltipWidget> ResolvedTooltipClass = ResolveTooltipClass())
+	// Unit icon widgets are pooled. If this slot has already been hovered, keep
+	// its existing tooltip content current without constructing a new widget.
+	if (UnitTooltipWidget)
 	{
-		if (APlayerController* PC = GetOwningPlayer())
-		{
-			UnitTooltipWidget = CreateWidget<URTSTooltipWidget>(PC, ResolvedTooltipClass);
-		}
-		else if (UWorld* World = GetWorld())
-		{
-			UnitTooltipWidget = CreateWidget<URTSTooltipWidget>(World, ResolvedTooltipClass);
-		}
+		UnitTooltipWidget->SetTooltipContent(
+			FText::FromString(Data.Name),
+			FText::FromString(BuildUnitTooltipDescription(Data)),
+			FText::GetEmpty(),
+			Data.Icon
+		);
+	}
+}
 
-		if (UnitTooltipWidget)
+UWidget* URTSUnitIconWidget::GetOrCreateTooltipWidget()
+{
+	if (!UnitTooltipWidget)
+	{
+		if (TSubclassOf<URTSTooltipWidget> ResolvedTooltipClass = ResolveTooltipClass())
 		{
-			UnitTooltipWidget->SetTooltipContent(
-				FText::FromString(Data.Name),
-				FText::FromString(BuildUnitTooltipDescription(Data)),
-				FText::GetEmpty(),
-				Data.Icon
-			);
-			SetToolTip(UnitTooltipWidget);
-			return;
+			if (APlayerController* PC = GetOwningPlayer())
+			{
+				UnitTooltipWidget = CreateWidget<URTSTooltipWidget>(PC, ResolvedTooltipClass);
+			}
+			else if (UWorld* World = GetWorld())
+			{
+				UnitTooltipWidget = CreateWidget<URTSTooltipWidget>(World, ResolvedTooltipClass);
+			}
 		}
 	}
 
-	FString Tooltip = Data.Name;
-	if (!Data.Role.IsEmpty()) Tooltip += FString::Printf(TEXT("\n%s"), *Data.Role);
-	if (Data.Count > 1) Tooltip += FString::Printf(TEXT("\n数量: %d"), Data.Count);
-	if (Data.MaxHealth > 0) Tooltip += FString::Printf(TEXT("\n生命值: %.0f/%.0f"), Data.Health, Data.MaxHealth);
-	if (Data.MaxEnergy > 0) Tooltip += FString::Printf(TEXT("\n能量: %.0f/%.0f"), Data.Energy, Data.MaxEnergy);
-	if (Data.MaxShield > 0) Tooltip += FString::Printf(TEXT("\n护盾: %.0f/%.0f"), Data.Shield, Data.MaxShield);
-	SetToolTipText(FText::FromString(Tooltip));
+	if (UnitTooltipWidget)
+	{
+		UpdateTooltip(StoredData);
+	}
+	return UnitTooltipWidget;
+}
+
+FReply URTSUnitIconWidget::NativeOnPreviewMouseButtonDown(
+	const FGeometry& InGeometry,
+	const FPointerEvent& InMouseEvent)
+{
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton
+		&& StoredData.bIsCommandProgressItem)
+	{
+		UObject* ActionTarget = StoredData.CommandProgressActionTarget.Get();
+		if (StoredData.bCanCancelCommandProgressItem
+			&& ActionTarget
+			&& ActionTarget->Implements<URTSCommandProgressController>())
+		{
+			IRTSCommandProgressController::
+				Execute_RequestCancelCommandProgressItem(
+					ActionTarget,
+					StoredData.CommandProgressItemId);
+		}
+		return FReply::Handled();
+	}
+	return Super::NativeOnPreviewMouseButtonDown(InGeometry, InMouseEvent);
 }
 
 FReply URTSUnitIconWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
@@ -236,6 +348,21 @@ FReply URTSUnitIconWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, 
 	// Check for Left Click
 	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
+		if (StoredData.bIsCommandProgressItem)
+		{
+			UObject* ActionTarget = StoredData.CommandProgressActionTarget.Get();
+			if (StoredData.bCanCancelCommandProgressItem
+				&& ActionTarget
+				&& ActionTarget->Implements<URTSCommandProgressController>())
+			{
+				IRTSCommandProgressController::
+					Execute_RequestCancelCommandProgressItem(
+						ActionTarget,
+						StoredData.CommandProgressItemId);
+			}
+			return FReply::Handled();
+		}
+
 		if (APlayerController* PC = GetOwningPlayer())
 		{
 			if (ULocalPlayer* LP = PC->GetLocalPlayer())

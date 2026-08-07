@@ -8,14 +8,11 @@
 #include "RTSFormationListWidget.generated.h"
 
 class UPanelWidget;
-class URTSUnitIconWidget;
+class USizeBox;
+class UUniformGridPanel;
+class URTSControlGroupButton;
 
-/**
- * Independent formation/control-group strip inside the UnitPanel header.
- *
- * This widget is not the selection roster and does not decide UnitPanel size.
- * It only visualizes the current high-level groups exposed by FRTSSelectionView.
- */
+/** Persistent 0-9 control-group strip for the bottom UnitDetailPanel header. */
 UCLASS(BlueprintType, Blueprintable)
 class RTSINPUTSYSTEM_API URTSFormationListWidget : public UUserWidget
 {
@@ -28,37 +25,48 @@ public:
 
 protected:
 	UFUNCTION()
-	virtual void OnSelectionUpdated(const FRTSSelectionView& View);
+	virtual void OnControlGroupsUpdated(const FRTSControlGroupsView& View);
 
-	/** Icon widget used for each formation/group indicator. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Formation List")
-	TSubclassOf<URTSUnitIconWidget> FormationIconClass;
+	/** Optional visual subclass. Native URTSControlGroupButton is used when unset. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups")
+	TSubclassOf<URTSControlGroupButton> ControlGroupButtonClass;
 
-	/** Maximum visible formation/group indicators. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Formation List", meta = (ClampMin = "1"))
-	int32 MaxFormationSlots = 8;
+	/** The runtime supports keyboard groups 0-9; values are clamped to ten. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 MaxFormationSlots = 10;
 
-	/** Square size for each formation/group indicator. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Formation List", meta = (ClampMin = "1"))
-	int32 FormationIconSize = 32;
+	/** Readable card geometry; defaults align one card with one selection-grid column. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups", meta = (ClampMin = "1"))
+	int32 FormationSlotWidth = 128;
 
-	/** Gap between formation/group indicators. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Formation List", meta = (ClampMin = "0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups", meta = (ClampMin = "1"))
+	int32 FormationSlotHeight = 64;
+
+	/** Visible assigned cards wrap after this many columns. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 FormationColumns = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RTS Control Groups", meta = (ClampMin = "0"))
 	float FormationSlotGap = 4.0f;
 
-	/** Container authored by the UMG asset. Usually a HorizontalBox. */
+	/** Existing UnitFormationList asset already authors this exact root name. */
 	UPROPERTY(meta = (BindWidget))
 	UPanelWidget* FormationSlotContainer;
 
-	UFUNCTION(BlueprintImplementableEvent, Category = "RTS Formation List")
-	void OnFormationListChanged(const FRTSSelectionView& View);
+	UFUNCTION(BlueprintImplementableEvent, Category = "RTS Control Groups")
+	void OnControlGroupListChanged(const FRTSControlGroupsView& View);
 
 private:
 	UPROPERTY()
-	TArray<URTSUnitIconWidget*> FormationSlots;
+	TArray<URTSControlGroupButton*> ControlGroupButtons;
+
+	UPROPERTY()
+	TArray<USizeBox*> ControlGroupSlotBoxes;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UUniformGridPanel> ControlGroupGrid;
 
 	void ApplyFormationSettings();
 	void BuildSlotPool();
-	void RefreshFormationList(const FRTSSelectionView& View);
-	void HideSlots();
+	void RefreshControlGroups(const FRTSControlGroupsView& View);
 };

@@ -2,7 +2,10 @@
 
 #include "UI/RTSMinimapJumpWidget.h"
 #include "RTSCamera.h"
+#include "RTSSelectionSubsystem.h"
+#include "RTSSelector.h"
 #include "Components/ActorComponent.h"
+#include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Rendering/DrawElements.h"
@@ -276,15 +279,138 @@ void URTSMinimapJumpWidget::RequestWorldLocation(const FVector2D& WorldPos)
 	TryJumpToWorldLocation(WorldLocation);
 }
 
+FVector URTSMinimapJumpWidget::ResolveCommandWorldLocation(const FVector2D& WorldPos) const
+{
+	FVector WorldLocation(WorldPos, MapOrigin.Z);
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return WorldLocation;
+	}
+
+	// Minimap input has no viewport ray. Project its XY coordinate vertically so
+	// movement receives the same kind of ground location as a scene right-click.
+	const float TraceHalfHeight = FMath::Max(
+		100000.0f,
+		FMath::Max(MapExtents.X, MapExtents.Y) * 4.0f);
+	const FVector TraceStart(WorldPos, MapOrigin.Z + TraceHalfHeight);
+	const FVector TraceEnd(WorldPos, MapOrigin.Z - TraceHalfHeight);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(RTSMinimapCommandGroundTrace), false);
+	if (const APlayerController* PlayerController = GetOwningPlayer())
+	{
+		QueryParams.AddIgnoredActor(PlayerController);
+		QueryParams.AddIgnoredActor(PlayerController->GetPawn());
+	}
+
+	FHitResult GroundHit;
+	if (World->LineTraceSingleByChannel(
+		GroundHit,
+		TraceStart,
+		TraceEnd,
+		ECC_Visibility,
+		QueryParams))
+	{
+		WorldLocation = GroundHit.Location;
+	}
+
+	return WorldLocation;
+}
+
+bool URTSMinimapJumpWidget::TryCommitPendingCommand(const FVector& WorldLocation) const
+{
+	APlayerController* PlayerController = GetOwningPlayer();
+	URTSSelector* Selector = PlayerController
+		? PlayerController->FindComponentByClass<URTSSelector>()
+		: nullptr;
+	return Selector && Selector->CommitPendingTargetingAtWorldLocation(WorldLocation);
+}
+
+bool URTSMinimapJumpWidget::HandlePendingTargetConfirmationAtScreenPosition(const FVector2D& ScreenPosition)
+{
+	if (!IsVisible())
+	{
+		return false;
+	}
+
+	const FGeometry Geometry = GetCachedGeometry();
+	const FVector2D LocalSize = Geometry.GetLocalSize();
+	if (LocalSize.X <= 0.0f || LocalSize.Y <= 0.0f)
+	{
+		return false;
+	}
+
+	const FVector2D LocalPosition = Geometry.AbsoluteToLocal(ScreenPosition);
+	if (LocalPosition.X < 0.0f
+		|| LocalPosition.Y < 0.0f
+		|| LocalPosition.X > LocalSize.X
+		|| LocalPosition.Y > LocalSize.Y)
+	{
+		return false;
+	}
+
+	const FVector2D WorldPosition = ConvertWidgetLocalToWorld(LocalPosition, LocalSize);
+	TryCommitPendingCommand(ResolveCommandWorldLocation(WorldPosition));
+
+	// The pointer belongs to the minimap. Do not let an unsupported minimap
+	// target fall through and hit the scene hidden behind the widget.
+	return true;
+}
+
+bool URTSMinimapJumpWidget::TryIssueMoveCommand(const FVector& WorldLocation) const
+{
+	APlayerController* PlayerController = GetOwningPlayer();
+	ULocalPlayer* LocalPlayer = PlayerController ? PlayerController->GetLocalPlayer() : nullptr;
+	URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer
+		? LocalPlayer->GetSubsystem<URTSSelectionSubsystem>()
+		: nullptr;
+	if (!SelectionSubsystem)
+	{
+		return false;
+	}
+
+	const FGameplayTag MoveTag = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.Command.Move")),
+		false);
+	if (!MoveTag.IsValid())
+	{
+		return false;
+	}
+
+	const bool bQueueCommand = PlayerController->IsInputKeyDown(EKeys::LeftShift)
+		|| PlayerController->IsInputKeyDown(EKeys::RightShift);
+	SelectionSubsystem->IssueCommandWithLocation(MoveTag, WorldLocation, bQueueCommand);
+	return true;
+}
+
+void URTSMinimapJumpWidget::RequestMoveCommand(const FVector2D& WorldPos)
+{
+	const FVector WorldLocation = ResolveCommandWorldLocation(WorldPos);
+	TryIssueMoveCommand(WorldLocation);
+}
+
 FReply URTSMinimapJumpWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
-		bIsDragging = true;
 		const FVector2D LocalPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
 		const FVector2D WorldPos = ConvertWidgetLocalToWorld(LocalPos, InGeometry.GetLocalSize());
+		bIsDragging = true;
 		RequestWorldLocation(WorldPos);
 		return FReply::Handled().CaptureMouse(TakeWidget());
+	}
+	if (InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+	{
+		const FVector2D LocalPos = InGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+		const FVector2D WorldPos = ConvertWidgetLocalToWorld(LocalPos, InGeometry.GetLocalSize());
+		const FVector WorldLocation = ResolveCommandWorldLocation(WorldPos);
+		if (!TryCommitPendingCommand(WorldLocation))
+		{
+			TryIssueMoveCommand(WorldLocation);
+		}
+		// Consume RMB here so the global viewport command cannot issue a second
+		// command at the scene location hidden behind the minimap.
+		return FReply::Handled();
 	}
 	return FReply::Unhandled();
 }
@@ -295,6 +421,10 @@ FReply URTSMinimapJumpWidget::NativeOnMouseButtonUp(const FGeometry& InGeometry,
 	{
 		bIsDragging = false;
 		return FReply::Handled().ReleaseMouseCapture();
+	}
+	if (InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+	{
+		return FReply::Handled();
 	}
 	return FReply::Unhandled();
 }

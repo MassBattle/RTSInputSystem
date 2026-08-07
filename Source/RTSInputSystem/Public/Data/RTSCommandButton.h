@@ -9,6 +9,8 @@
 #include "InputCoreTypes.h"
 #include "RTSCommandButton.generated.h"
 
+class UStaticMesh;
+
 UENUM(BlueprintType)
 enum class ERTSCommandTargetType : uint8
 {
@@ -60,6 +62,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	FKey Hotkey;
 
+	/**
+	 * Building footprint measured in logical placement-grid cells.
+	 * Zero uses URTSInputPanelSettings::HashGridSelectionFootprintCells.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	FIntPoint PlacementFootprintCells = FIntPoint::ZeroValue;
+
 	// Should this button be hidden if the command is unavailable?
 	// If false, it will be shown as disabled (greyed out).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "UI")
@@ -92,6 +101,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Logic")
     TArray<FGameplayTag> Requirements;
 
+	/** Optional authored building mesh shown at the cursor while placing this command. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	TSoftObjectPtr<UStaticMesh> PlacementPreviewMesh;
+
     /**
      * Executes the logic associated with this button.
      * @param Executor The Actor that is performing the command.
@@ -114,4 +127,9 @@ public:
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "RTS Command")
 	bool IsAutoCastEnabledForContext(UObject* WorldContextObject, AActor* Executor) const;
 	virtual bool IsAutoCastEnabledForContext_Implementation(UObject* WorldContextObject, AActor* Executor) const;
+
+	/** Optional queue badge value. Zero hides the badge. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "RTS Command")
+	int32 GetQueueCountForContext(UObject* WorldContextObject, AActor* Executor) const;
+	virtual int32 GetQueueCountForContext_Implementation(UObject* WorldContextObject, AActor* Executor) const;
 };

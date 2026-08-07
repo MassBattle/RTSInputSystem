@@ -6,10 +6,17 @@
 #include "GameplayTagContainer.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
+#include "TimerManager.h"
 #include "RTSHUD.h"
 #include "RTSSelectable.h"
+#include "RTSSelectionStructs.h"
+#include "Data/RTSCommandButton.h"
 #include "Components/ActorComponent.h"
 #include "RTSSelector.generated.h"
+
+class AActor;
+class UStaticMesh;
+class URTSSelectable;
 
 USTRUCT(BlueprintType)
 struct RTSINPUTSYSTEM_API FRTSHashGridSelectionResult
@@ -30,6 +37,15 @@ struct RTSINPUTSYSTEM_API FRTSHashGridSelectionResult
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTSCamera - Hash Grid Selection")
 	FVector2D FootprintCells = FVector2D::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTSCamera - Hash Grid Selection")
+	FVector GroundNormal = FVector::UpVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTSCamera - Hash Grid Selection")
+	bool bIsValidPlacement = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RTSCamera - Hash Grid Selection")
+	FText InvalidReason;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRTSHashGridSelectionCommitted, const FRTSHashGridSelectionResult&, Result);
@@ -69,8 +85,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	void BeginTargeting(FGameplayTag CommandTag);
 
+	/** Starts targeting while preserving the button's explicit target model. */
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	void BeginTargetingWithType(FGameplayTag CommandTag, ERTSCommandTargetType TargetType);
+
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	void CancelTargeting();
+
+	/** Commits the active targeted command at the current cursor position. */
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	bool CommitPendingTargetingAtCursor();
+
+	/** Commits the active location-capable command at an explicit world point, such as a minimap click. */
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	bool CommitPendingTargetingAtWorldLocation(FVector WorldLocation);
 
 	// Input Action handler for Right Click
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
@@ -113,6 +141,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Hash Grid Selection")
 	void BeginHashGridSelectionWithFootprint(FGameplayTag CommandTag, FVector2D FootprintCells, float CellSize);
 
+	/** C++ placement entry that also supplies the authored building ghost mesh. */
+	void BeginHashGridSelectionWithFootprintAndPreview(
+		FGameplayTag CommandTag,
+		FVector2D FootprintCells,
+		float CellSize,
+		UStaticMesh* PreviewMesh);
+
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Hash Grid Selection")
 	void CancelHashGridSelection();
 
@@ -121,6 +156,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent);
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -134,25 +170,149 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<class UDecalComponent> HashGridSelectionDecalComponent;
 
+	/** Unhidden local host for placement primitives; AController owners are hidden by UE. */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> BuildPlacementPreviewActor;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UInputComponent> ControlGroupInputComponent;
+
+	TWeakObjectPtr<APlayerController> ControlGroupInputOwner;
+	TWeakObjectPtr<class UUserWidget> BoundTopSelectWidget;
+
 	FVector2D SelectionStart;
 	FVector2D SelectionEnd;
 
 	bool bIsSelecting;
 	bool bSkipCurrentSelectionClick = false;
 	bool bIsHashGridSelecting = false;
+	ERTSCommandTargetType PendingTargetType = ERTSCommandTargetType::Location;
 	FVector2D ActiveHashGridFootprintCells = FVector2D::ZeroVector;
 	float ActiveHashGridCellSize = 0.0f;
+	struct FBuildPlacementGuidanceSample
+	{
+		FVector WorldLocation = FVector::ZeroVector;
+		FVector GroundNormal = FVector::UpVector;
+		bool bBuildable = false;
+	};
+	struct FMoveCommandFeedbackPulse
+	{
+		FVector WorldLocation = FVector::ZeroVector;
+		TArray<FVector> GroundRingPoints;
+		float ElapsedSeconds = 0.0f;
+		bool bAttackGround = false;
+	};
+	struct FSelectedTaskRoute
+	{
+		FVector Start = FVector::ZeroVector;
+		FVector End = FVector::ZeroVector;
+		TArray<FVector> GroundRingPoints;
+		bool bAttackMove = false;
+	};
+	TMap<FIntPoint, FBuildPlacementGuidanceSample> BuildPlacementGuidanceSampleCache;
+	TArray<FMoveCommandFeedbackPulse> MoveCommandFeedbackPulses;
+	TArray<FSelectedTaskRoute> SelectedTaskRoutes;
+	FIntPoint LastBuildPlacementGuidanceCell = FIntPoint::ZeroValue;
+	FVector2D LastBuildPlacementGuidanceFootprintCells = FVector2D::ZeroVector;
+	float LastBuildPlacementGuidanceCellSize = 0.0f;
+	int32 LastBuildPlacementGuidanceRadiusCells = 0;
+	bool bHasBuildPlacementGuidanceAnchor = false;
+	FVector SelectedTaskRouteAnchor = FVector::ZeroVector;
+	bool bHasSelectedTaskRouteAnchor = false;
+	bool bSelectedPathPreviewVisible = false;
+	TWeakObjectPtr<URTSSelectable> HoveredActorSelectable;
+	FEntityHandle HoveredMassEntity;
+	bool bCursorOverSelectable = false;
+	bool bHoverVisualApplied = false;
+	int32 LastRecalledControlGroupIndex = INDEX_NONE;
+	double LastControlGroupRecallTime = -1.0;
+	FTimerHandle TopSelectBindRetryTimerHandle;
+	FDelegateHandle CommandFeedbackDelegateHandle;
 
 	void BindInputActions();
 	void BindInputMappingContext();
+	void InstallStrategyMouseCursors();
+	void RestoreStrategyMouseCursors();
+	void UpdateSelectableHoverPreview();
+	void ClearSelectableHoverPreview(bool bRestoreDefaultCursor);
+	void EnsureSelectionFxRenderer();
+	void RefreshFeedbackTickEnabled();
+	void RegisterControlGroupHotkeys();
+	void UnregisterControlGroupHotkeys();
+	void HandleControlGroupHotkey(int32 GroupIndex);
+	void TryBindTopSelectButtons();
+	void UnbindTopSelectButtons();
+	void BindTopSelectButton(FName WidgetName, FName HandlerName);
+	void SelectTopCategory(const TCHAR* TagName);
 	void CollectComponentDependencyReferences();
+
+	UFUNCTION()
+	void HandleSubsystemSelectionChanged(const FRTSSelectionView& SelectionView);
+
+	UFUNCTION()
+	void HandleControlGroupFocusRequested(int32 GroupIndex, FVector WorldCenter);
+
+	void HandleCommandFeedbackIssued(
+		FGameplayTag CommandTag,
+		FVector WorldLocation,
+		bool bHasWorldLocation,
+		bool bQueue);
+
+	UFUNCTION() void SelectAllArtillery();
+	UFUNCTION() void SelectAllAircraft();
+	UFUNCTION() void SelectAllNaval();
+	UFUNCTION() void SelectAllDefense();
+	UFUNCTION() void SelectAllArmor();
+	UFUNCTION() void SelectAllInfantry();
+	UFUNCTION() void SelectAllGroundArmy();
+	UFUNCTION() void SelectAllEngineers();
+	UFUNCTION() void SelectAllCities();
+	UFUNCTION() void SelectAllUniversities();
+	UFUNCTION() void SelectAllResearch();
+	UFUNCTION() void SelectAllGovernment();
+	UFUNCTION() void SelectAllPorts();
+	UFUNCTION() void SelectAllAirports();
+	UFUNCTION() void SelectAllBarracks();
+	UFUNCTION() void SelectAllMilitaryCamps();
 	bool ShouldUseHashGridSelectionForCommand(FGameplayTag CommandTag) const;
 	bool GetHashGridSelectionResult(FRTSHashGridSelectionResult& OutResult) const;
-	bool ProjectHashGridSelectionLocationToGround(const FVector& CandidateLocation, FVector& OutLocation) const;
+	bool ProjectHashGridSelectionLocationToGround(
+		const FVector& CandidateLocation,
+		FVector& OutLocation,
+		FVector& OutNormal,
+		AActor*& OutGroundActor) const;
+	bool ValidateHashGridSelection(
+		const FRTSHashGridSelectionResult& Result,
+		AActor* GroundActor,
+		FText& OutInvalidReason) const;
 	FVector SnapHashGridSelectionLocation(const FVector& Location) const;
 	FIntPoint GetHashGridCellForLocation(const FVector& Location) const;
-	void BeginHashGridSelectionInternal(FGameplayTag CommandTag, FVector2D FootprintCells, float CellSize);
+	AActor* GetOrCreateBuildPlacementPreviewActor();
+	AActor* GetBuildPlacementPreviewActor() const;
+	void DestroyBuildPlacementPreviewActor();
+	void BeginHashGridSelectionInternal(
+		FGameplayTag CommandTag,
+		FVector2D FootprintCells,
+		float CellSize,
+		UStaticMesh* PreviewMesh);
 	void UpdateHashGridSelectionPreview();
+	void UpdateBuildPlacementGuidance(const FRTSHashGridSelectionResult& Result);
+	void ClearBuildPlacementGuidance(bool bResetSamples);
+	void DrawHashGridSelectionPreview(const FRTSHashGridSelectionResult& Result) const;
 	void EndHashGridSelectionPreview();
 	void CommitHashGridSelection();
+	bool IsCommandQueueModifierDown() const;
+	bool IssuePendingTargetingCommand(const FHitResult& Hit);
+	bool ResolveSmartCommandHit(FHitResult& OutHit, bool& bOutHostileUnitTarget) const;
+	void ShowGroundCommandFeedback(const FVector& Location, bool bAttackGround);
+	void UpdateMoveCommandFeedback(float DeltaTime);
+	void ClearMoveCommandFeedback();
+	TArray<FVector> BuildGroundConformingRing(
+		const FVector& Center,
+		float Radius,
+		int32 Segments) const;
+	bool CacheSelectedTaskRouteAnchor(const FVector2D& ScreenPosition);
+	void RedrawSelectedTaskRoutes();
+	void ClearSelectedPathPreview();
+	class UMaterialInterface* ResolveCommandFeedbackMaterial() const;
 };
