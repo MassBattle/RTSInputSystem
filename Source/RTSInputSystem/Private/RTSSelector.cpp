@@ -25,14 +25,14 @@ URTSSelector::URTSSelector(): PlayerController(nullptr), HUD(nullptr), bIsSelect
 
 	// Add defaults for input actions
 	static ConstructorHelpers::FObjectFinder<UInputAction>
-		BeginSelectionActionFinder(TEXT("/OpenRTSCamera/Inputs/BeginSelection"));
+		BeginSelectionActionFinder(TEXT("/RTSInputSystem/Inputs/BeginSelection"));
 	static ConstructorHelpers::FObjectFinder<UInputMappingContext>
-		InputMappingContextFinder(TEXT("/OpenRTSCamera/Inputs/OpenRTSCameraInputs"));
+		InputMappingContextFinder(TEXT("/RTSInputSystem/Inputs/RTSInputSystemInputs"));
 	this->BeginSelection = BeginSelectionActionFinder.Object;
 	this->InputMappingContext = InputMappingContextFinder.Object;
 
 	static ConstructorHelpers::FObjectFinder<UInputAction>
-		IssueCommandActionFinder(TEXT("/OpenRTSCamera/Inputs/IssueCommand"));
+		IssueCommandActionFinder(TEXT("/RTSInputSystem/Inputs/IssueCommand"));
 	if (IssueCommandActionFinder.Succeeded())
 	{
 		this->IssueCommandAction = IssueCommandActionFinder.Object;
@@ -171,7 +171,7 @@ void URTSSelector::BindInputActions()
 		if (!this->IssueCommandAction)
 		{
 			// Dynamically load it in case the CDO failed to find it during editor startup
-			this->IssueCommandAction = Cast<UInputAction>(StaticLoadObject(UInputAction::StaticClass(), nullptr, TEXT("/Script/EnhancedInput.InputAction'/OpenRTSCamera/Inputs/IssueCommand.IssueCommand'")));
+			this->IssueCommandAction = Cast<UInputAction>(StaticLoadObject(UInputAction::StaticClass(), nullptr, TEXT("/Script/EnhancedInput.InputAction'/RTSInputSystem/Inputs/IssueCommand.IssueCommand'")));
 		}
 
 		if (this->IssueCommandAction)
@@ -186,7 +186,7 @@ void URTSSelector::BindInputActions()
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("[RTSSelector] IssueCommandAction is NULL! Ensure it exists at /OpenRTSCamera/Inputs/IssueCommand"));
+			UE_LOG(LogTemp, Error, TEXT("[RTSSelector] IssueCommandAction is NULL! Ensure it exists at /RTSInputSystem/Inputs/IssueCommand"));
 		}
 	}
 }
@@ -564,7 +564,7 @@ void URTSSelector::BeginHashGridSelectionInternal(FGameplayTag CommandTag, FVect
 			DecalMaterial = Cast<UMaterialInterface>(StaticLoadObject(
 				UMaterialInterface::StaticClass(),
 				nullptr,
-				TEXT("/OpenRTSCamera/Visualization/M_RTSBuildPlacementDecal.M_RTSBuildPlacementDecal")
+				TEXT("/RTSInputSystem/Feedback/M_RTSBuildPlacementGrid.M_RTSBuildPlacementGrid")
 			));
 		}
 

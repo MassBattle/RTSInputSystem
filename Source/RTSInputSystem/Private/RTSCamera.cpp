@@ -132,14 +132,14 @@ URTSCamera::URTSCamera()
 	this->currentVerticalSocketOffset = 0.0f;
 
 	/// 载入并关联输入资产
-	static ConstructorHelpers::FObjectFinder<UInputAction> xMoveActionFinder(TEXT("/OpenRTSCamera/Inputs/MoveCameraXAxis"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> yMoveActionFinder(TEXT("/OpenRTSCamera/Inputs/MoveCameraYAxis"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> rotateActionFinder(TEXT("/OpenRTSCamera/Inputs/RotateCameraAxis"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> leftTurnActionFinder(TEXT("/OpenRTSCamera/Inputs/TurnCameraLeft"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> rightTurnActionFinder(TEXT("/OpenRTSCamera/Inputs/TurnCameraRight"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> zoomActionFinder(TEXT("/OpenRTSCamera/Inputs/ZoomCamera"));
-	static ConstructorHelpers::FObjectFinder<UInputAction> dragActionFinder(TEXT("/OpenRTSCamera/Inputs/DragCamera"));
-	static ConstructorHelpers::FObjectFinder<UInputMappingContext> contextFinder(TEXT("/OpenRTSCamera/Inputs/OpenRTSCameraInputs"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> xMoveActionFinder(TEXT("/RTSInputSystem/Inputs/MoveCameraXAxis"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> yMoveActionFinder(TEXT("/RTSInputSystem/Inputs/MoveCameraYAxis"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> rotateActionFinder(TEXT("/RTSInputSystem/Inputs/RotateCameraAxis"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> leftTurnActionFinder(TEXT("/RTSInputSystem/Inputs/TurnCameraLeft"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> rightTurnActionFinder(TEXT("/RTSInputSystem/Inputs/TurnCameraRight"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> zoomActionFinder(TEXT("/RTSInputSystem/Inputs/ZoomCamera"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> dragActionFinder(TEXT("/RTSInputSystem/Inputs/DragCamera"));
+	static ConstructorHelpers::FObjectFinder<UInputMappingContext> contextFinder(TEXT("/RTSInputSystem/Inputs/RTSInputSystemInputs"));
 
 	this->moveCameraXAxisAction = xMoveActionFinder.Object;
 	this->moveCameraYAxisAction = yMoveActionFinder.Object;
