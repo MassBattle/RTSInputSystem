@@ -34,6 +34,13 @@ DECLARE_MULTICAST_DELEGATE_FourParams(FRTSExternalMassInstantCommandHandler, UOb
 DECLARE_MULTICAST_DELEGATE_FiveParams(FRTSExternalMassLocationCommandHandler, UObject* /*WorldContextObject*/, const FGameplayTag& /*CommandTag*/, const FVector& /*Location*/, const FRTSSelectionView& /*SelectionView*/, bool& /*bHandled*/);
 DECLARE_MULTICAST_DELEGATE_FiveParams(FRTSExternalMassTargetCommandHandler, UObject* /*WorldContextObject*/, const FGameplayTag& /*CommandTag*/, AActor* /*TargetActor*/, const FRTSSelectionView& /*SelectionView*/, bool& /*bHandled*/);
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FRTSExternalMassUnitDataEnricher, UObject* /*WorldContextObject*/, const FEntityHandle& /*Entity*/, FRTSUnitData& /*Data*/);
+DECLARE_MULTICAST_DELEGATE_FiveParams(
+	FRTSExternalQuickSelectionResolver,
+	const class URTSSelectionSubsystem* /*SelectionSubsystem*/,
+	const FRTSSelectionQuery& /*Query*/,
+	TArray<AActor*>& /*OutActors*/,
+	TArray<FEntityHandle>& /*OutEntities*/,
+	bool& /*bHandled*/);
 DECLARE_MULTICAST_DELEGATE_SixParams(
 	FRTSExternalBuildPlacementValidator,
 	UObject* /*WorldContextObject*/,
@@ -162,6 +169,8 @@ public:
 
 	/** Native extension point for optional systems to append live activity/status data to Mass units. */
 	static FRTSExternalMassUnitDataEnricher& OnEnrichMassUnitData();
+	/** Lets a project-owned indexed registry satisfy a quick-selection query without a world scan. */
+	static FRTSExternalQuickSelectionResolver& OnResolveQuickSelection();
 
 	/** Native extension points used by optional plugins to intercept Mass commands before default Move/Attack handling. */
 	static FRTSExternalMassInstantCommandHandler& OnHandleMassInstantCommand();
@@ -309,6 +318,10 @@ private:
 	void BroadcastControlGroupsView();
 	bool GetControlGroupFocusLocation(int32 GroupIndex, FVector& OutWorldCenter);
 	void CollectUnitsMatchingQuery(const FRTSSelectionQuery& Query, TArray<AActor*>& OutActors, TArray<FEntityHandle>& OutEntities) const;
-	FGameplayTagContainer BuildSelectionTags(const FString& TypeKey, const FString& Role, const FGameplayTagContainer& ExplicitTags) const;
+	FGameplayTagContainer BuildSelectionTags(
+		const FString& TypeKey,
+		const FString& Role,
+		const FGameplayTagContainer& ExplicitTags,
+		FGameplayTag UnitTypeTag = FGameplayTag()) const;
 	bool IsMassEntityIdle(const FEntityHandle& Handle) const;
 };

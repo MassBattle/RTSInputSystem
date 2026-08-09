@@ -136,9 +136,10 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 		{
 			UnitIcon->SetVisibility(ESlateVisibility::Visible);
 			
-			if (Data.Icon)
+			UTexture2D* DisplayTexture = Data.Icon ? Data.Icon : Data.Portrait;
+			if (DisplayTexture)
 			{
-				UnitIcon->SetBrushFromTexture(Data.Icon);
+				UnitIcon->SetBrushFromTexture(DisplayTexture);
 				// Reset color to white (in case it was tinted differently)
 				UnitIcon->SetColorAndOpacity(FLinearColor::White);
 			}
@@ -146,7 +147,7 @@ void URTSUnitIconWidget::InitData(const FRTSUnitData& Data, bool bShowIcon, bool
 			{
 				UnitIcon->SetColorAndOpacity(FLinearColor::Transparent);
 				UnitIcon->SetVisibility(ESlateVisibility::Hidden);
-				UE_LOG(LogTemp, Verbose, TEXT("RTSUnitIconWidget: Data.Icon is null for %s. Hiding icon placeholder."), *Data.Name);
+				UE_LOG(LogTemp, Verbose, TEXT("RTSUnitIconWidget: Icon and portrait are null for %s. Hiding icon placeholder."), *Data.Name);
 			}
 
 			if (DesiredIconSize > 0)

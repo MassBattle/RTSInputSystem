@@ -4,7 +4,9 @@
 #include "Components/TextBlock.h"
 #include "Components/RichTextBlock.h"
 #include "Components/Image.h"
+#include "Components/Border.h"
 #include "Engine/DataTable.h"
+#include "Brushes/SlateColorBrush.h"
 
 namespace
 {
@@ -17,6 +19,11 @@ void URTSTooltipWidget::NativeConstruct()
 
 	// RichTextBlock's Slate style instance exists only after construction.
 	ApplyConfiguredStyle();
+	if (UBorder* Background = Cast<UBorder>(GetWidgetFromName(TEXT("Background"))))
+	{
+		Background->SetBrush(FSlateColorBrush(
+			FLinearColor(0.008f, 0.018f, 0.028f, 0.96f)));
+	}
 }
 
 void URTSTooltipWidget::ApplyConfiguredStyle()

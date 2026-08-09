@@ -81,7 +81,9 @@ void URTSActiveGroupWidget::OnSelectionUpdated(const FRTSSelectionView& View)
 
 		if (AvatarImage)
 		{
-			UTexture2D* AvatarTexture = ActiveData->Portrait;
+			UTexture2D* AvatarTexture = ActiveData->Portrait
+				? ActiveData->Portrait
+				: ActiveData->Icon;
 			if (AvatarTexture)
 			{
 				AvatarImage->SetBrushFromTexture(AvatarTexture);

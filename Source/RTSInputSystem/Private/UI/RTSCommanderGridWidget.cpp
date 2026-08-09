@@ -4,6 +4,7 @@
 #include "Blueprint/SlateBlueprintLibrary.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
+#include "Blueprint/WidgetTree.h"
 #include "Engine/Texture2D.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Engine.h"
@@ -203,7 +204,11 @@ namespace
 		const FName CacheKey(IconFileName);
 		if (UTexture2D** CachedTexture = IconCache.Find(CacheKey))
 		{
-			return *CachedTexture;
+			if (IsValid(*CachedTexture))
+			{
+				return *CachedTexture;
+			}
+			IconCache.Remove(CacheKey);
 		}
 
 		const FString IconPath = FPaths::Combine(
@@ -226,7 +231,10 @@ namespace
 			}
 		}
 
-		IconCache.Add(CacheKey, Texture);
+		if (Texture)
+		{
+			IconCache.Add(CacheKey, Texture);
+		}
 		return Texture;
 	}
 
@@ -279,6 +287,11 @@ void URTSCommanderGridWidget::SynchronizeProperties()
 void URTSCommanderGridWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	// The command tooltip is part of the command panel, not a mouse-following
+	// tooltip. Blueprint defaults from older widget instances must not move it
+	// away from the panel.
+	bFixedTooltipAboveGrid = true;
 
 	InitGridSlots();
 	
@@ -1074,7 +1087,12 @@ void URTSCommanderGridWidget::PositionSharedTooltip()
 
 	if (bFixedTooltipAboveGrid)
 	{
-		const FGeometry AnchorGeometry = CommandGridPanel
+		UWidget* CommandFrame = WidgetTree
+			? WidgetTree->FindWidget(TEXT("CommandFrameBox"))
+			: nullptr;
+		const FGeometry AnchorGeometry = CommandFrame
+			? CommandFrame->GetCachedGeometry()
+			: CommandGridPanel
 			? CommandGridPanel->GetCachedGeometry()
 			: GetCachedGeometry();
 		FVector2D PixelPosition;
@@ -1086,12 +1104,16 @@ void URTSCommanderGridWidget::PositionSharedTooltip()
 			AnchorViewportPosition);
 
 		const FVector2D AnchorSize = AnchorGeometry.GetLocalSize();
+		const FVector2D PanelTooltipSize(
+			FMath::Max(AnchorSize.X, 1.0f),
+			TooltipSize.Y);
+		SharedTooltip->SetDesiredSizeInViewport(PanelTooltipSize);
 		FVector2D FinalPos(
-			AnchorViewportPosition.X + (AnchorSize.X - TooltipSize.X) * 0.5f,
-			AnchorViewportPosition.Y - TooltipSize.Y + TooltipYOffset);
+			AnchorViewportPosition.X,
+			AnchorViewportPosition.Y - PanelTooltipSize.Y + TooltipYOffset);
 
 		FinalPos = ClampTooltipPosition(
-			this, FinalPos, TooltipSize, TooltipViewportMargin);
+			this, FinalPos, PanelTooltipSize, TooltipViewportMargin);
 		SharedTooltip->SetPositionInViewport(FinalPos, false);
 		return;
 	}

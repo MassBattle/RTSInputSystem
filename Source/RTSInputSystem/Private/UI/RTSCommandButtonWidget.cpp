@@ -27,6 +27,29 @@ void URTSCommandButtonWidget::NativeConstruct()
 	}
 }
 
+void URTSCommandButtonWidget::NativeTick(
+	const FGeometry& MyGeometry,
+	const float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	if (!bProgressItemMode
+		|| ProgressState != ERTSTimedCommandState::Active
+		|| !ActivityProgressBar
+		|| ProgressDurationSeconds <= 0.0f)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const float PresentationElapsed = ProgressSnapshotElapsedSeconds
+		+ (World
+			? FMath::Max(0.0f, World->GetTimeSeconds() - ProgressSnapshotWorldSeconds)
+			: 0.0f);
+	ActivityProgressBar->SetPercent(FMath::Min(
+		PresentationElapsed / ProgressDurationSeconds,
+		0.999f));
+}
+
 void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext, FKey InOverrideHotkey)
 {
 	bProgressItemMode = false;
@@ -35,6 +58,9 @@ void URTSCommandButtonWidget::Init(URTSCommandButton* InData, AActor* InContext,
 	ProgressActionTarget = nullptr;
 	ProgressQueueIndex = 0;
 	ProgressState = ERTSTimedCommandState::Active;
+	ProgressSnapshotElapsedSeconds = 0.0f;
+	ProgressDurationSeconds = 0.0f;
+	ProgressSnapshotWorldSeconds = 0.0f;
 	SetRenderOpacity(1.0f);
     ButtonData = InData;
     ContextActor = InContext;
@@ -190,6 +216,9 @@ void URTSCommandButtonWidget::InitProgressItem(
 		: InContext;
 	ProgressQueueIndex = ProgressItem.QueueIndex;
 	ProgressState = ProgressItem.State;
+	ProgressSnapshotElapsedSeconds = FMath::Max(0.0f, ProgressItem.ElapsedSeconds);
+	ProgressDurationSeconds = FMath::Max(0.0f, ProgressItem.DurationSeconds);
+	ProgressSnapshotWorldSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 
 	if (HotkeyText)
 	{

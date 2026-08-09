@@ -480,7 +480,11 @@ namespace
 		const int32 IconIndex = static_cast<int32>(Seed % UE_ARRAY_COUNT(DefaultIconFiles));
 		if (UTexture2D** CachedTexture = IconCache.Find(IconIndex))
 		{
-			return *CachedTexture;
+			if (IsValid(*CachedTexture))
+			{
+				return *CachedTexture;
+			}
+			IconCache.Remove(IconIndex);
 		}
 
 		const FString IconPath = FPaths::Combine(
@@ -503,21 +507,24 @@ namespace
 			}
 		}
 
-		IconCache.Add(IconIndex, Texture);
+		// A temporarily missing source file must not poison the entire editor
+		// session. Cache successful imports only so a later selection can retry.
+		if (Texture)
+		{
+			IconCache.Add(IconIndex, Texture);
+		}
 		return Texture;
 	}
 
 	UTexture2D* LoadDefaultUnitAvatar()
 	{
 		static UTexture2D* CachedAvatar = nullptr;
-		static bool bAttemptedLoad = false;
 
-		if (bAttemptedLoad)
+		if (IsValid(CachedAvatar))
 		{
 			return CachedAvatar;
 		}
 
-		bAttemptedLoad = true;
 		const FString AvatarPath = FPaths::Combine(
 			FPaths::ProjectPluginsDir(),
 			TEXT("RTSInputSystem"),
@@ -1397,6 +1404,12 @@ FRTSExternalMassUnitDataEnricher& URTSSelectionSubsystem::OnEnrichMassUnitData()
 	return Enricher;
 }
 
+FRTSExternalQuickSelectionResolver& URTSSelectionSubsystem::OnResolveQuickSelection()
+{
+	static FRTSExternalQuickSelectionResolver Resolver;
+	return Resolver;
+}
+
 FRTSExternalMassInstantCommandHandler& URTSSelectionSubsystem::OnHandleMassInstantCommand()
 {
 	static FRTSExternalMassInstantCommandHandler Handler;
@@ -2188,13 +2201,63 @@ bool URTSSelectionSubsystem::RequestControlGroupFocus(int32 GroupIndex)
 FGameplayTagContainer URTSSelectionSubsystem::BuildSelectionTags(
 	const FString& TypeKey,
 	const FString& Role,
-	const FGameplayTagContainer& ExplicitTags) const
+	const FGameplayTagContainer& ExplicitTags,
+	const FGameplayTag UnitTypeTag) const
 {
 	FGameplayTagContainer Tags = ExplicitTags;
 	const FString SearchText = (TypeKey + TEXT(" ") + Role).ToLower();
+	const FGameplayTag InfantryType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Infantry")), false);
+	const FGameplayTag ArmorType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Armor")), false);
+	const FGameplayTag ArtilleryType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Artillery")), false);
+	const FGameplayTag AirType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Air")), false);
+	const FGameplayTag NavalType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Naval")), false);
+	const FGameplayTag OfficerType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Officer")), false);
+	const FGameplayTag StructureType = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("RTS.UnitClass.Structure")), false);
 	const FGameplayTag StructureRootTag = FGameplayTag::RequestGameplayTag(
 		FName(TEXT("RTS.Selection.Structure")), false);
-	const bool bExplicitStructure = StructureRootTag.IsValid() && Tags.HasTag(StructureRootTag);
+	const bool bTypedStructure = StructureType.IsValid()
+		&& UnitTypeTag.MatchesTagExact(StructureType);
+	const bool bExplicitStructure = (StructureRootTag.IsValid() && Tags.HasTag(StructureRootTag))
+		|| bTypedStructure;
+
+	if (InfantryType.IsValid() && UnitTypeTag.MatchesTagExact(InfantryType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Infantry"));
+		return Tags;
+	}
+	if (ArmorType.IsValid() && UnitTypeTag.MatchesTagExact(ArmorType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Armor"));
+		return Tags;
+	}
+	if (ArtilleryType.IsValid() && UnitTypeTag.MatchesTagExact(ArtilleryType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Artillery"));
+		return Tags;
+	}
+	if (AirType.IsValid() && UnitTypeTag.MatchesTagExact(AirType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Air"));
+		return Tags;
+	}
+	if (NavalType.IsValid() && UnitTypeTag.MatchesTagExact(NavalType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Naval"));
+		return Tags;
+	}
+	if (OfficerType.IsValid() && UnitTypeTag.MatchesTagExact(OfficerType))
+	{
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Army.Ground.Engineer"));
+		AddSelectionTag(Tags, TEXT("RTS.Selection.Worker"));
+		return Tags;
+	}
 
 	const bool bStructure = bExplicitStructure || ContainsAny(SearchText,
 		{ TEXT("structure"), TEXT("defence"), TEXT("defense"), TEXT("bunker"), TEXT("building"), TEXT("production"),
@@ -2291,6 +2354,17 @@ void URTSSelectionSubsystem::CollectUnitsMatchingQuery(
 {
 	OutActors.Reset();
 	OutEntities.Reset();
+	bool bHandledByIndexedResolver = false;
+	OnResolveQuickSelection().Broadcast(
+		this,
+		Query,
+		OutActors,
+		OutEntities,
+		bHandledByIndexedResolver);
+	if (bHandledByIndexedResolver)
+	{
+		return;
+	}
 
 	// Mass is the primary runtime path. It queries only the minimal identity/team
 	// fragments, then resolves the RTS category protocol without touching proxies.
@@ -2299,7 +2373,7 @@ void URTSSelectionSubsystem::CollectUnitsMatchingQuery(
 		FEntityQuery EntityQuery;
 		EntityQuery.All<FTeam, FSubType>();
 		const TArray<FEntityHandle> Candidates = UMassAPIFuncLib::GetMatchingEntities(this, EntityQuery);
-		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+		const URTSInputPanelSettings* Settings = RTSUnitTypeProtocol::GetSettings();
 
 		UWorld* World = GetWorld();
 		UMassEntitySubsystem* MassSubsystem = World ? World->GetSubsystem<UMassEntitySubsystem>() : nullptr;
@@ -2323,7 +2397,11 @@ void URTSSelectionSubsystem::CollectUnitsMatchingQuery(
 			const FString TypeKey = GetMassProtocolTypeKey(Protocol, SubType->Index);
 			const FString Role = Protocol ? Protocol->Role : FString();
 			const FGameplayTagContainer ExplicitTags = Protocol ? Protocol->SelectionTags : FGameplayTagContainer();
-			const FGameplayTagContainer SelectionTags = BuildSelectionTags(TypeKey, Role, ExplicitTags);
+			const FGameplayTagContainer SelectionTags = BuildSelectionTags(
+				TypeKey,
+				Role,
+				ExplicitTags,
+				Protocol ? Protocol->UnitTypeTag : FGameplayTag());
 			if (MatchesRequiredSelectionTag(Query, SelectionTags))
 			{
 				OutEntities.Add(Handle);
@@ -2534,7 +2612,8 @@ FRTSUnitData URTSSelectionSubsystem::CreateUnitDataFromEntity(const FEntityHandl
 					Data.SelectionTags = BuildSelectionTags(
 						Data.TypeKey,
 						Data.Role,
-						Protocol ? Protocol->SelectionTags : FGameplayTagContainer());
+						Protocol ? Protocol->SelectionTags : FGameplayTagContainer(),
+						Protocol ? Protocol->UnitTypeTag : FGameplayTag());
 
 					if (const FHealth* Health = EM.GetFragmentDataPtr<FHealth>(NativeHandle))
 					{

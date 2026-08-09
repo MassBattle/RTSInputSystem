@@ -24,6 +24,9 @@ class RTSINPUTSYSTEM_API URTSCommandButtonWidget : public UUserWidget
 public:
 	
 	virtual void NativeConstruct() override;
+	virtual void NativeTick(
+		const FGeometry& MyGeometry,
+		float InDeltaTime) override;
     virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 
 	UFUNCTION(BlueprintCallable, Category = "RTS Command")
@@ -104,6 +107,9 @@ protected:
 	bool bCanCancelProgressItem = false;
 	int32 ProgressQueueIndex = 0;
 	ERTSTimedCommandState ProgressState = ERTSTimedCommandState::Active;
+	float ProgressSnapshotElapsedSeconds = 0.0f;
+	float ProgressDurationSeconds = 0.0f;
+	float ProgressSnapshotWorldSeconds = 0.0f;
 
     // State tracking for efficient updates
 	bool bIsCooldownActive = false;
