@@ -1,6 +1,7 @@
 #include "UI/RTSUnitPanelWidget.h"
 #include "UI/RTSCommandButtonWidget.h"
 #include "UI/RTSCommanderGridWidget.h"
+#include "UI/RTSFormationListWidget.h"
 #include "UI/RTSUnitIconWidget.h"
 #include "RTSInputPanelSettings.h"
 #include "RTSSelectionSubsystem.h"
@@ -11,12 +12,14 @@
 #include "Components/ProgressBar.h"
 #include "Components/Border.h"
 #include "Components/BorderSlot.h"
+#include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/OverlaySlot.h"
 #include "Components/SizeBox.h"
 #include "Components/Spacer.h"
 #include "Components/UniformGridPanel.h"
 #include "Components/UniformGridSlot.h"
+#include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Components/GridPanel.h"
 #include "Components/GridSlot.h"
@@ -296,6 +299,86 @@ void URTSUnitPanelWidget::ApplyFixedPanelSlotLayout()
 
 TSharedRef<SWidget> URTSUnitPanelWidget::RebuildWidget()
 {
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		UnitPanelFrame = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("UnitPanelFrame"));
+		UnitPanelFrame->SetBrushColor(FLinearColor(0.012f, 0.035f, 0.052f, 0.97f));
+		UnitPanelFrame->SetPadding(FMargin(8.0f));
+
+		UVerticalBox* ContentRoot = WidgetTree->ConstructWidget<UVerticalBox>(
+			UVerticalBox::StaticClass(), TEXT("UnitPanelContentRoot"));
+		UnitPanelFrame->SetContent(ContentRoot);
+
+		URTSFormationListWidget* FormationList = WidgetTree->ConstructWidget<URTSFormationListWidget>(
+			URTSFormationListWidget::StaticClass(), TEXT("UnitFormationList"));
+		ContentRoot->AddChildToVerticalBox(FormationList);
+
+		UHorizontalBox* DetailPane = WidgetTree->ConstructWidget<UHorizontalBox>(
+			UHorizontalBox::StaticClass(), TEXT("UnitDetailPane"));
+		UnitDetailPane = DetailPane;
+		if (UVerticalBoxSlot* DetailSlot = ContentRoot->AddChildToVerticalBox(DetailPane))
+		{
+			DetailSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+			DetailSlot->SetVerticalAlignment(VAlign_Center);
+		}
+
+		USizeBox* DetailIconSize = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("UnitIconContainer"));
+		DetailIconSize->SetWidthOverride(IconSlotSize);
+		DetailIconSize->SetHeightOverride(IconSlotSize);
+		UImage* DetailIcon = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), TEXT("UnitIconImage"));
+		DetailIconSize->AddChild(DetailIcon);
+		DetailPane->AddChildToHorizontalBox(DetailIconSize);
+
+		UVerticalBox* DetailText = WidgetTree->ConstructWidget<UVerticalBox>(
+			UVerticalBox::StaticClass(), TEXT("InfoVerticalBox"));
+		if (UHorizontalBoxSlot* DetailTextSlot = DetailPane->AddChildToHorizontalBox(DetailText))
+		{
+			DetailTextSlot->SetPadding(FMargin(18.0f, 0.0f, 0.0f, 0.0f));
+			DetailTextSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+			DetailTextSlot->SetVerticalAlignment(VAlign_Center);
+		}
+
+		auto AddDetailText = [this, DetailText](const FName Name, const FLinearColor Color)
+		{
+			UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), Name);
+			Text->SetColorAndOpacity(FSlateColor(Color));
+			DetailText->AddChildToVerticalBox(Text);
+			return Text;
+		};
+		AddDetailText(TEXT("UnitNameText"), FLinearColor(0.78f, 1.0f, 0.91f, 1.0f));
+		AddDetailText(TEXT("UnitRoleText"), FLinearColor(0.72f, 0.78f, 0.82f, 1.0f));
+		AddDetailText(TEXT("UnitTypeText"), FLinearColor(0.48f, 0.62f, 0.72f, 1.0f));
+
+		auto AddDetailBar = [this, DetailText](const FName Name, const FLinearColor Color)
+		{
+			UProgressBar* Bar = WidgetTree->ConstructWidget<UProgressBar>(UProgressBar::StaticClass(), Name);
+			Bar->SetFillColorAndOpacity(Color);
+			DetailText->AddChildToVerticalBox(Bar);
+		};
+		AddDetailBar(TEXT("HealthBar"), FLinearColor(0.18f, 0.9f, 0.32f, 1.0f));
+		AddDetailBar(TEXT("EnergyBar"), FLinearColor(0.15f, 0.55f, 1.0f, 1.0f));
+		AddDetailBar(TEXT("ShieldBar"), FLinearColor(0.55f, 0.78f, 1.0f, 1.0f));
+		AddDetailText(TEXT("ActivityText"), FLinearColor(1.0f, 0.72f, 0.16f, 1.0f));
+		AddDetailBar(TEXT("ActivityBar"), FLinearColor(1.0f, 0.72f, 0.16f, 1.0f));
+
+		UUniformGridPanel* Roster = WidgetTree->ConstructWidget<UUniformGridPanel>(
+			UUniformGridPanel::StaticClass(), TEXT("IconContainer"));
+		UnitRosterPane = Roster;
+		IconContainer = Roster;
+		if (UVerticalBoxSlot* RosterSlot = ContentRoot->AddChildToVerticalBox(Roster))
+		{
+			RosterSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		}
+
+		UnitIconClass = URTSUnitIconWidget::StaticClass();
+		IconWidgetClass = URTSUnitIconWidget::StaticClass();
+		CommandButtonWidgetClass = URTSCommandButtonWidget::StaticClass();
+		WidgetTree->RootWidget = UnitPanelFrame;
+	}
+
 	const TSharedRef<SWidget> BuiltWidget = Super::RebuildWidget();
 	const FVector2D FixedSize = CalculateFixedPanelSize();
 

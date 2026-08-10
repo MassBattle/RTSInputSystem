@@ -24,6 +24,8 @@ public:
 	virtual void NativeDestruct() override;
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
+
 	UFUNCTION()
 	virtual void OnControlGroupsUpdated(const FRTSControlGroupsView& View);
 

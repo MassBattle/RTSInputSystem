@@ -2,7 +2,11 @@
 
 #include "UI/RTSCommandButtonWidget.h"
 #include "UI/RTSTooltipWidget.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Overlay.h"
+#include "Components/OverlaySlot.h"
 #include "Components/ProgressBar.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Interfaces/RTSCommandInterface.h"
@@ -11,6 +15,78 @@
 #include "UI/RTSCommanderGridWidget.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+
+TSharedRef<SWidget> URTSCommandButtonWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		USizeBox* RootSize = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("DefaultCommandButtonSize"));
+		RootSize->SetWidthOverride(144.0f);
+		RootSize->SetHeightOverride(144.0f);
+
+		MainButton = WidgetTree->ConstructWidget<UButton>(
+			UButton::StaticClass(), TEXT("MainButton"));
+		MainButton->SetBackgroundColor(FLinearColor(0.035f, 0.08f, 0.12f, 0.96f));
+		RootSize->AddChild(MainButton);
+
+		UOverlay* Face = WidgetTree->ConstructWidget<UOverlay>(
+			UOverlay::StaticClass(), TEXT("CommandButtonFace"));
+		MainButton->AddChild(Face);
+
+		IconImage = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), TEXT("IconImage"));
+		if (UOverlaySlot* IconSlot = Face->AddChildToOverlay(IconImage))
+		{
+			IconSlot->SetPadding(FMargin(10.0f, 10.0f, 10.0f, 32.0f));
+			IconSlot->SetHorizontalAlignment(HAlign_Fill);
+			IconSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		CooldownImage = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), TEXT("CooldownImage"));
+		CooldownImage->SetColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.65f));
+		CooldownImage->SetVisibility(ESlateVisibility::Collapsed);
+		Face->AddChildToOverlay(CooldownImage);
+
+		DisplayNameText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("DisplayNameText"));
+		DisplayNameText->SetJustification(ETextJustify::Center);
+		DisplayNameText->SetAutoWrapText(true);
+		DisplayNameText->SetColorAndOpacity(FSlateColor(FLinearColor::White));
+		if (UOverlaySlot* LabelSlot = Face->AddChildToOverlay(DisplayNameText))
+		{
+			LabelSlot->SetPadding(FMargin(6.0f, 78.0f, 6.0f, 20.0f));
+			LabelSlot->SetHorizontalAlignment(HAlign_Fill);
+			LabelSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		HotkeyText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("HotkeyText"));
+		HotkeyText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.78f, 0.2f, 1.0f)));
+		if (UOverlaySlot* HotkeySlot = Face->AddChildToOverlay(HotkeyText))
+		{
+			HotkeySlot->SetPadding(FMargin(6.0f));
+			HotkeySlot->SetHorizontalAlignment(HAlign_Right);
+			HotkeySlot->SetVerticalAlignment(VAlign_Bottom);
+		}
+
+		ActivityProgressBar = WidgetTree->ConstructWidget<UProgressBar>(
+			UProgressBar::StaticClass(), TEXT("ActivityProgressBar"));
+		ActivityProgressBar->SetFillColorAndOpacity(FLinearColor(0.2f, 0.8f, 1.0f, 1.0f));
+		ActivityProgressBar->SetVisibility(ESlateVisibility::Collapsed);
+		if (UOverlaySlot* ProgressSlot = Face->AddChildToOverlay(ActivityProgressBar))
+		{
+			ProgressSlot->SetPadding(FMargin(4.0f));
+			ProgressSlot->SetHorizontalAlignment(HAlign_Fill);
+			ProgressSlot->SetVerticalAlignment(VAlign_Bottom);
+		}
+
+		WidgetTree->RootWidget = RootSize;
+	}
+
+	return Super::RebuildWidget();
+}
 
 void URTSCommandButtonWidget::NativeConstruct()
 {

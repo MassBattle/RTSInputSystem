@@ -1,16 +1,49 @@
 // Copyright 2024 Winy unq All Rights Reserved.
 
 #include "UI/RTSTooltipWidget.h"
+#include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
 #include "Components/RichTextBlock.h"
 #include "Components/Image.h"
 #include "Components/Border.h"
+#include "Components/VerticalBox.h"
 #include "Engine/DataTable.h"
 #include "Brushes/SlateColorBrush.h"
 
 namespace
 {
 	const TCHAR* UnifiedTooltipRichTextStyleSetPath = TEXT("/Game/UI/HeadUpDisplay/RTSStyle/DT_RTS_UnifiedRichTextStyle.DT_RTS_UnifiedRichTextStyle");
+}
+
+TSharedRef<SWidget> URTSTooltipWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		UBorder* Background = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("Background"));
+		Background->SetBrushColor(FLinearColor(0.008f, 0.018f, 0.028f, 0.96f));
+		Background->SetPadding(FMargin(14.0f));
+
+		UVerticalBox* Stack = WidgetTree->ConstructWidget<UVerticalBox>(
+			UVerticalBox::StaticClass(), TEXT("TooltipStack"));
+		Background->SetContent(Stack);
+
+		TitleText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("TitleText"));
+		Stack->AddChildToVerticalBox(TitleText);
+
+		DescriptionText = WidgetTree->ConstructWidget<URichTextBlock>(
+			URichTextBlock::StaticClass(), TEXT("DescriptionText"));
+		Stack->AddChildToVerticalBox(DescriptionText);
+
+		CostText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("CostText"));
+		Stack->AddChildToVerticalBox(CostText);
+
+		WidgetTree->RootWidget = Background;
+	}
+
+	return Super::RebuildWidget();
 }
 
 void URTSTooltipWidget::NativeConstruct()

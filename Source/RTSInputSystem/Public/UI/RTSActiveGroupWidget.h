@@ -21,6 +21,7 @@ class RTSINPUTSYSTEM_API URTSActiveGroupWidget : public UUserWidget
 	GENERATED_BODY()
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 

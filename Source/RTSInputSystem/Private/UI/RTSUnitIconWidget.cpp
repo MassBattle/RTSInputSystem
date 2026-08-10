@@ -2,10 +2,15 @@
 #include "RTSSelectionSubsystem.h"
 #include "UI/RTSTooltipWidget.h"
 #include "Interfaces/RTSCommandProgressController.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Border.h"
 #include "Components/Image.h"
+#include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
 #include "Components/ProgressBar.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
+#include "Components/VerticalBox.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 
@@ -77,6 +82,80 @@ namespace
 
 		return FString::Join(Lines, TEXT("<n/>"));
 	}
+}
+
+TSharedRef<SWidget> URTSUnitIconWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		USizeBox* RootSize = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("DefaultUnitIconSize"));
+		RootSize->SetWidthOverride(128.0f);
+		RootSize->SetHeightOverride(128.0f);
+
+		UBorder* Background = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("DefaultUnitIconBackground"));
+		Background->SetBrushColor(FLinearColor(0.025f, 0.065f, 0.085f, 0.96f));
+		Background->SetPadding(FMargin(4.0f));
+		RootSize->AddChild(Background);
+
+		UOverlay* Face = WidgetTree->ConstructWidget<UOverlay>(
+			UOverlay::StaticClass(), TEXT("DefaultUnitIconFace"));
+		Background->SetContent(Face);
+
+		UnitIcon = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), TEXT("UnitIcon"));
+		if (UOverlaySlot* IconSlot = Face->AddChildToOverlay(UnitIcon))
+		{
+			IconSlot->SetPadding(FMargin(2.0f, 2.0f, 2.0f, 36.0f));
+			IconSlot->SetHorizontalAlignment(HAlign_Fill);
+			IconSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		UVerticalBox* StatusStack = WidgetTree->ConstructWidget<UVerticalBox>(
+			UVerticalBox::StaticClass(), TEXT("DefaultUnitStatusStack"));
+		if (UOverlaySlot* StackSlot = Face->AddChildToOverlay(StatusStack))
+		{
+			StackSlot->SetPadding(FMargin(4.0f));
+			StackSlot->SetHorizontalAlignment(HAlign_Fill);
+			StackSlot->SetVerticalAlignment(VAlign_Bottom);
+		}
+
+		UnitNameText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("UnitNameText"));
+		UnitNameText->SetJustification(ETextJustify::Center);
+		UnitNameText->SetColorAndOpacity(FSlateColor(FLinearColor::White));
+		StatusStack->AddChildToVerticalBox(UnitNameText);
+
+		HealthBar = WidgetTree->ConstructWidget<UProgressBar>(
+			UProgressBar::StaticClass(), TEXT("HealthBar"));
+		HealthBar->SetFillColorAndOpacity(FLinearColor(0.18f, 0.9f, 0.32f, 1.0f));
+		StatusStack->AddChildToVerticalBox(HealthBar);
+
+		EnergyBar = WidgetTree->ConstructWidget<UProgressBar>(
+			UProgressBar::StaticClass(), TEXT("EnergyBar"));
+		EnergyBar->SetFillColorAndOpacity(FLinearColor(0.15f, 0.55f, 1.0f, 1.0f));
+		StatusStack->AddChildToVerticalBox(EnergyBar);
+
+		ShieldBar = WidgetTree->ConstructWidget<UProgressBar>(
+			UProgressBar::StaticClass(), TEXT("ShieldBar"));
+		ShieldBar->SetFillColorAndOpacity(FLinearColor(0.55f, 0.78f, 1.0f, 1.0f));
+		StatusStack->AddChildToVerticalBox(ShieldBar);
+
+		CountText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), TEXT("CountText"));
+		CountText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.82f, 0.2f, 1.0f)));
+		if (UOverlaySlot* CountSlot = Face->AddChildToOverlay(CountText))
+		{
+			CountSlot->SetPadding(FMargin(6.0f));
+			CountSlot->SetHorizontalAlignment(HAlign_Right);
+			CountSlot->SetVerticalAlignment(VAlign_Top);
+		}
+
+		WidgetTree->RootWidget = RootSize;
+	}
+
+	return Super::RebuildWidget();
 }
 
 void URTSUnitIconWidget::NativeOnInitialized()

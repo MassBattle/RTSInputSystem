@@ -39,6 +39,7 @@ public:
 	void SetIsActive(bool bActive);
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeOnInitialized() override;
 	virtual void NativeConstruct() override;
 

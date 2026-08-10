@@ -4,7 +4,9 @@
 #include "RTSCamera.h"
 #include "RTSSelectionSubsystem.h"
 #include "RTSSelector.h"
+#include "Blueprint/WidgetTree.h"
 #include "Components/ActorComponent.h"
+#include "Components/Border.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
@@ -18,6 +20,20 @@ URTSMinimapJumpWidget::URTSMinimapJumpWidget(const FObjectInitializer& ObjectIni
 {
 	SetVisibility(ESlateVisibility::Visible);
 	ForceVolatile(true);
+}
+
+TSharedRef<SWidget> URTSMinimapJumpWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		UBorder* InputSurface = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("MinimapInputSurface"));
+		InputSurface->SetBrushColor(FLinearColor::Transparent);
+		InputSurface->SetVisibility(ESlateVisibility::HitTestInvisible);
+		WidgetTree->RootWidget = InputSurface;
+	}
+
+	return Super::RebuildWidget();
 }
 
 void URTSMinimapJumpWidget::NativeConstruct()

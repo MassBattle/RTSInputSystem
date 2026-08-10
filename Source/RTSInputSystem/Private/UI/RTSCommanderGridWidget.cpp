@@ -1,4 +1,5 @@
 #include "UI/RTSCommanderGridWidget.h"
+#include "Components/Border.h"
 #include "Components/UniformGridSlot.h"
 #include "Components/InputComponent.h"
 #include "Blueprint/SlateBlueprintLibrary.h"
@@ -271,6 +272,29 @@ namespace
 		}
 	}
 
+}
+
+TSharedRef<SWidget> URTSCommanderGridWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		UBorder* Root = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("DefaultCommandGridFrame"));
+		Root->SetBrushColor(FLinearColor(0.012f, 0.035f, 0.052f, 0.97f));
+		Root->SetPadding(FMargin(6.0f));
+
+		CommandGridPanel = WidgetTree->ConstructWidget<UUniformGridPanel>(
+			UUniformGridPanel::StaticClass(), TEXT("CommandGridPanel"));
+		Root->SetContent(CommandGridPanel);
+
+		ButtonParams = URTSCommandButtonWidget::StaticClass();
+		TooltipClass = URTSTooltipWidget::StaticClass();
+		ButtonSize = FVector2D(112.0f, 112.0f);
+		SlotPadding = FMargin(3.0f);
+		WidgetTree->RootWidget = Root;
+	}
+
+	return Super::RebuildWidget();
 }
 
 void URTSCommanderGridWidget::NativePreConstruct()

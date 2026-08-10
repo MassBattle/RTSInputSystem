@@ -22,6 +22,19 @@ namespace
 	const int32 FormationControlGroupDisplayOrder[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
 }
 
+TSharedRef<SWidget> URTSFormationListWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		UHorizontalBox* Root = WidgetTree->ConstructWidget<UHorizontalBox>(
+			UHorizontalBox::StaticClass(), TEXT("FormationSlotContainer"));
+		FormationSlotContainer = Root;
+		WidgetTree->RootWidget = Root;
+	}
+
+	return Super::RebuildWidget();
+}
+
 void URTSFormationListWidget::NativePreConstruct()
 {
 	Super::NativePreConstruct();

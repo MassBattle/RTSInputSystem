@@ -59,6 +59,7 @@ public:
 	FOnCommandButtonClicked OnCommandClicked;
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UButton> MainButton;

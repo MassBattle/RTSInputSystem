@@ -33,6 +33,7 @@ public:
 	virtual void OnSelectionUpdated(const FRTSSelectionView& View) override;
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 
 	// The Grid Panel to hold buttons
 	UPROPERTY(meta = (BindWidget))

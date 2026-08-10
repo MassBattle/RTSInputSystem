@@ -3,7 +3,10 @@
 #include "UI/RTSActiveGroupWidget.h"
 #include "UI/RTSUnitIconWidget.h"
 #include "RTSSelectionSubsystem.h" 
+#include "Blueprint/WidgetTree.h"
+#include "Components/Border.h"
 #include "Components/Image.h"
+#include "Components/SizeBox.h"
 
 namespace
 {
@@ -11,6 +14,30 @@ namespace
 	{
 		return Data.GroupKey.IsEmpty() ? Data.Name : Data.GroupKey;
 	}
+}
+
+TSharedRef<SWidget> URTSActiveGroupWidget::RebuildWidget()
+{
+	if (WidgetTree && !WidgetTree->RootWidget)
+	{
+		USizeBox* RootSize = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("DefaultActiveGroupSize"));
+		RootSize->SetWidthOverride(160.0f);
+		RootSize->SetHeightOverride(160.0f);
+
+		UBorder* Background = WidgetTree->ConstructWidget<UBorder>(
+			UBorder::StaticClass(), TEXT("DefaultActiveGroupBackground"));
+		Background->SetBrushColor(FLinearColor(0.012f, 0.035f, 0.052f, 0.97f));
+		Background->SetPadding(FMargin(8.0f));
+		RootSize->AddChild(Background);
+
+		GroupIcon = WidgetTree->ConstructWidget<URTSUnitIconWidget>(
+			URTSUnitIconWidget::StaticClass(), TEXT("GroupIcon"));
+		Background->SetContent(GroupIcon);
+		WidgetTree->RootWidget = RootSize;
+	}
+
+	return Super::RebuildWidget();
 }
 
 void URTSActiveGroupWidget::NativeConstruct()

@@ -31,6 +31,7 @@ public:
 	void SetTooltipContent(const FText& InTitle, const FText& InDescription, const FText& InCost, UTexture2D* InIcon);
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> TitleText;
