@@ -2749,6 +2749,14 @@ void URTSSelector::BeginHashGridSelectionInternal(
 	if (!HashGridSelectionDecalComponent->GetDecalMaterial())
 	{
 		UMaterialInterface* DecalMaterial = Settings ? Settings->HashGridSelectionDecalMaterial.LoadSynchronous() : nullptr;
+		if (!DecalMaterial)
+		{
+			DecalMaterial = Cast<UMaterialInterface>(StaticLoadObject(
+				UMaterialInterface::StaticClass(),
+				nullptr,
+				TEXT("/RTSInputSystem/Feedback/M_RTSBuildPlacementGrid.M_RTSBuildPlacementGrid")
+			));
+		}
 
 		if (DecalMaterial)
 		{
